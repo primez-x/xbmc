@@ -20361,8 +20361,8 @@ msgstr "Aktiven Bildbereich für Untertitel ohne DV erkennen"
 #. Subtitle placement
 #: system/settings/settings.xml
 msgctxt "#69336"
-msgid "Optionally probe files during Amlogic SDR/HDR playback for stable encoded black borders. Player-added bars need no scan. Uses separate reads, seeks and software decoding and can compete with playback. Cache throttling is always applied to non-DV scans. Dark, inconsistent, variable-aspect, unsupported and unreadable sources fall back to the visible video rectangle. No live aspect tracking or Dolby metadata is produced. Changes apply on next playback."
-msgstr "Dateien bei SDR-/HDR-Wiedergabe über Amlogic optional auf stabile kodierte schwarze Ränder prüfen. Vom Player hinzugefügte Ränder benötigen keine Analyse. Separate Lesezugriffe, Suchvorgänge und Software-Dekodierung können mit der Wiedergabe konkurrieren. Die Cache-Drosselung gilt bei Analysen ohne DV immer. Dunkle, uneinheitliche, variable Bildformate sowie nicht unterstützte oder nicht lesbare Quellen verwenden das sichtbare Videorechteck. Es werden weder laufende Bildformatwechsel verfolgt noch Dolby-Metadaten erzeugt. Änderungen gelten bei der nächsten Wiedergabe."
+msgid "Optionally probe files during Amlogic SDR/HDR playback for stable encoded black borders. Player-added bars need no scan. Uses separate reads, seeks and software decoding and can compete with playback. Cache throttling is always applied to non-DV scans. Scans without supported paired border consensus, with variable framing, or with insufficient readable samples fall back to the visible video rectangle. No live aspect tracking or Dolby metadata is produced. Changes apply on next playback."
+msgstr "Dateien bei SDR-/HDR-Wiedergabe über Amlogic optional auf stabile kodierte schwarze Ränder prüfen. Vom Player hinzugefügte Ränder benötigen keine Analyse. Separate Lesezugriffe, Suchvorgänge und Software-Dekodierung können mit der Wiedergabe konkurrieren. Die Cache-Drosselung gilt bei Analysen ohne DV immer. Analysen ohne ausreichend bestätigte Randpaare, mit wechselnder Bildbegrenzung oder zu wenigen lesbaren Stichproben verwenden das sichtbare Videorechteck. Es werden weder laufende Bildformatwechsel verfolgt noch Dolby-Metadaten erzeugt. Änderungen gelten bei der nächsten Wiedergabe."
 
 #. SDR bitmap subtitle colour
 #: system/settings/settings.xml
@@ -20523,3 +20523,9 @@ msgstr "6.0"
 msgctxt "#69364"
 msgid "6.1"
 msgstr "6.1"
+
+#. Bitmap subtitle offset and margin (number slider)
+#: system/settings/settings.xml
+msgctxt "#69365"
+msgid "{0:.1f} %"
+msgstr "{0:.1f} %"

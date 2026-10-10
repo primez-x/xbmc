@@ -6,6 +6,8 @@ synthetic host sample validation, not software decoding or device acceptance.
 from pathlib import Path
 import argparse
 import os
+import re
+import signal
 import runpy
 import subprocess
 import tempfile
@@ -30,7 +32,14 @@ def source():
     code += access + '(void)sampleW;(void)sampleStartX;return contrast;}cleanup:return 0;}\n'
     code += 'Result Edges(Frame* frame){int lastWidth=frame->width,lastHeight=frame->height;\n'
     code += edges + 'return {sTop,sBottom,sLeft,sRight};}\n'
-    code += function(aml, 'static bool detect_samples_stable(') + '\n'
+    code += re.search(r'enum class DetectAxisConfidence\s*\{.*?\};', aml, re.S).group() + '\n'
+    code += function(aml, 'static DetectAxisConfidence detect_axis_consensus(') + '\n'
+    code += function(aml, 'static bool detect_samples_consensus(') + '\n'
+    code += re.search(r'static const uint32_t s_commonAR\[\] = \{.*?\};', aml, re.S).group() + '\n'
+    final = scan[scan.index('    /* Require enough usable samples'):scan.index('\n  }\n\n  detect_publish(')]
+    code += 'bool Select(const uint16_t* samples_top,const uint16_t* samples_bottom,const uint16_t* samples_left,const uint16_t* samples_right,int validSamples,int lastWidth,int lastHeight,DetectResult& result){\n'
+    code += 'constexpr int numSeeks=7;uint16_t detTop=0,detBottom=0,detLeft=0,detRight=0;{\n'
+    code += final + '\n}result={detTop,detBottom,detLeft,detRight};return true;cleanup:return false;}\n'
     cache = (ROOT / 'xbmc/cores/DataCacheCore.cpp').read_text()
     code += function(cache, 'DOVIFrameMetadata CDataCacheCore::GetVideoDoViFrameMetadata(double pts)') + '\n'
     code += function(cache, 'void CDataCacheCore::ClearVideoDoViFrameMetadata()')
@@ -39,7 +48,7 @@ def source():
     assert 'fmtCtx->flags |= AVFMT_FLAG_CUSTOM_IO;' in scan
     assert 'fmtCtx->interrupt_callback.opaque = const_cast<CAMLNativeWorker::Run*>(&run);' in scan
     assert 'av_freep(&avioCtx->buffer);' in scan and 'av_free(avioBuf);' in scan
-    assert 'detect_samples_stable(samples_top, samples_bottom, samples_left, samples_right, validSamples)' in scan
+    assert 'detect_samples_consensus(samples_top, samples_bottom, samples_left, samples_right,' in scan
     assert 'validSamples < minUsable' in scan and 'contrast < minContrast' in scan
     return code + TESTS
 
@@ -60,11 +69,13 @@ constexpr int AV_PIX_FMT_YUV420P=0,AV_PIX_FMT_YUVJ420P=1,AV_PIX_FMT_YUV422P=2,
  AV_PIX_FMT_YUVJ422P=3,AV_PIX_FMT_YUV444P=4,AV_PIX_FMT_YUVJ444P=5,
  AV_PIX_FMT_NV12=6,AV_PIX_FMT_NV21=7,AV_PIX_FMT_YUV420P10LE=8,AV_PIX_FMT_P010LE=9,
  AV_PIX_FMT_YUV420P10BE=10,AV_PIX_FMT_RGB24=11;
-constexpr int DV_DETECT_SKIPPED=4;
+constexpr int DV_DETECT_SKIPPED=4,DV_DETECT_SKIP_IMAX=5,LOGINFO=0;
+struct CLog{template<class... T>static void Log(T...) {}};
 std::atomic<int> s_detectState{0};
 struct Frame {int width=128,height=72,format=0;int linesize[1]{128};uint8_t* data[1]{};};
 struct Source {int width=128,height=72;};
-struct Result {uint16_t top,bottom,left,right;};
+struct DetectResult {uint16_t top,bottom,left,right;};
+using Result=DetectResult;
 struct DOVIFrameMetadata {double pts=0;bool has_level5_metadata=false;int top=0;};
 struct CDataCacheCore {
  CCriticalSection m_videoPlayerSection;
@@ -80,19 +91,79 @@ int main(){
  assert(AdmitFrame(&frame,&source));assert(Contrast(&frame)>10);
  auto edges=Edges(&frame);assert(edges.top==8&&edges.bottom==8&&edges.left==0&&edges.right==0);
  uint16_t top[7]={8,8,8,8,8,8,8},bottom[7]={8,8,8,8,8,8,8},left[7]={},right[7]={};
- assert(detect_samples_stable(top,bottom,left,right,7));assert(detect_samples_stable(top,bottom,left,right,6));
- assert(!detect_samples_stable(top,bottom,left,right,5));
+ DetectResult result{};
+ assert(detect_samples_consensus(top,bottom,left,right,7,result)&&result.top==8&&result.bottom==8);
+ assert(detect_samples_consensus(top,bottom,left,right,6,result));
+ assert(!detect_samples_consensus(top,bottom,left,right,5,result));
+ assert(!detect_samples_consensus(top,bottom,left,right,0,result));
+ assert(!detect_samples_consensus(top,bottom,left,right,8,result));
+ // Repeated completed reporter scan: paired vertical4/7; noisy horizontal has no veto.
+ uint16_t rt[]={262,846,262,471,262,262,262},rb[]={527,262,262,262,262,262,262};
+ uint16_t rl[]={5,714,0,499,0,896,128},rr[]={0,1041,532,0,523,941,0};
+ assert(detect_samples_consensus(rt,rb,rl,rr,7,result));
+ assert(result.top==262&&result.bottom==262&&result.left==0&&result.right==0);
+ assert(Select(rt,rb,rl,rr,7,3840,2160,result));
+ assert(result.top==263&&result.bottom==263&&result.left==0&&result.right==0);
+ // Paired consensus and snap must be invariant under scheduling order.
+ int order[]={0,1,2,3,4,5,6};
+ do {
+   uint16_t a[7],b[7],c[7],d[7];
+   for(int i=0;i<7;++i){a[i]=rt[order[i]];b[i]=rb[order[i]];c[i]=rl[order[i]];d[i]=rr[order[i]];}
+   assert(Select(a,b,c,d,7,3840,2160,result)&&result.top==263&&result.bottom==263&&result.left==0&&result.right==0);
+   for(int i=0;i<7;++i)assert(a[i]==rt[order[i]]&&b[i]==rb[order[i]]&&c[i]==rl[order[i]]&&d[i]==rr[order[i]]);
+ } while(std::next_permutation(order,order+7));
+ // Same supported framing at1080p uses unchanged common-AR snapping.
+ uint16_t ht[7],hb[7],hl[7],hr[7];
+ for(int i=0;i<7;++i){ht[i]=rt[i]/2;hb[i]=rb[i]/2;hl[i]=rl[i]/2;hr[i]=rr[i]/2;}
+ assert(Select(ht,hb,hl,hr,7,1920,1080,result)&&result.top==131&&result.bottom==131&&result.left==0&&result.right==0);
+ // First6 of this same scan has paired3/6: strict majority is4, not3.
+ assert(!detect_samples_consensus(rt,rb,rl,rr,6,result));
+ assert(!Select(rt,rb,rl,rr,6,3840,2160,result));
+ assert(!Select(rt,rb,rl,rr,5,3840,2160,result));
+ // Separate independent majorities do not substitute for paired evidence.
+ uint16_t disjointTop[]={262,262,262,262,262,500,500};
+ uint16_t disjointBottom[]={262,262,500,500,500,262,262};
+ uint16_t noisy[]={0,100,200,300,400,500,600};
+ assert(!detect_samples_consensus(disjointTop,disjointBottom,noisy,noisy,7,result));
+ // Ignore unilateral larger estimates on either axis, preserving symmetric counterpart.
+ top[5]=30;bottom[6]=30;
+ assert(detect_samples_consensus(top,bottom,left,right,7,result)&&result.top==8);
+ top[5]=8;bottom[6]=8;
+ // Five-pixel tolerance accepts symmetric near agreement, without sorting pairs.
+ top[1]=10;bottom[2]=10;top[3]=bottom[3]=9;
+ assert(detect_samples_consensus(top,bottom,left,right,7,result)&&result.top==8);
+ top[1]=bottom[2]=top[3]=bottom[3]=8;
+ // Smaller nonzero boundary or either zero endpoint defeats a stronger positive majority.
+ top[6]=2;assert(!detect_samples_consensus(top,bottom,left,right,7,result));top[6]=8;
+ bottom[6]=0;assert(!detect_samples_consensus(top,bottom,left,right,7,result));bottom[6]=8;
+ // Pillarbox uses the same paired policy; vertical noise cannot veto a supported axis.
+ uint16_t pt[]={0,100,200,300,400,500,600},pb[]={10,210,310,410,510,610,710};
+ uint16_t pl[]={480,480,480,900,480,480,480},pr[]={480,480,480,480,480,480,900};
+ assert(detect_samples_consensus(pt,pb,pl,pr,7,result)&&result.left==480&&result.right==480&&result.top==0);
+ assert(Select(pt,pb,pl,pr,7,3840,2160,result)&&result.left==480&&result.right==480&&result.top==0);
+ pl[6]=0;assert(!detect_samples_consensus(pt,pb,pl,pr,7,result));pl[6]=480;
+ pl[5]=pr[5]=300;assert(!detect_samples_consensus(pt,pb,pl,pr,7,result));pl[5]=pr[5]=480;
+ pl[5]=pr[5]=700;assert(!detect_samples_consensus(pt,pb,pl,pr,7,result));
+ pr[5]=710;assert(!detect_samples_consensus(pt,pb,pl,pr,7,result));pl[5]=pr[5]=480;
+ // Stable asymmetric framing cannot justify inventing a symmetric detected crop.
+ uint16_t asym[]={30,30,30,30,30,30,30};
+ assert(detect_samples_consensus(top,asym,left,right,7,result)&&result.top==0&&result.bottom==0);
+ assert(detect_samples_consensus(top,left,left,right,7,result)&&result.top==0&&result.bottom==0);
+ assert(detect_samples_consensus(left,right,left,right,7,result)&&result.top==0&&result.left==0);
  // Insufficient contrast never contributes a usable sample; dark-scene coverage is rejected.
  std::fill(image.begin(),image.end(),16);assert(Contrast(&frame)<10);
  // Variable aspect ratios are rejected even when both have significant nonzero bars.
- top[6]=bottom[6]=16;assert(!detect_samples_stable(top,bottom,left,right,7));
- top[6]=bottom[6]=0;assert(!detect_samples_stable(top,bottom,left,right,7));
- top[6]=bottom[6]=8;left[6]=20;assert(!detect_samples_stable(top,bottom,left,right,7));left[6]=0;
+ top[6]=bottom[6]=16;assert(!detect_samples_consensus(top,bottom,left,right,7,result));
+ top[6]=16;bottom[6]=30;assert(!detect_samples_consensus(top,bottom,left,right,7,result));
+ top[6]=bottom[6]=0;assert(!detect_samples_consensus(top,bottom,left,right,7,result));
+ top[6]=bottom[6]=8;left[6]=20;
+ // Former all-axis range assertion is intentionally corrected: unilateral horizontal darkness cannot reject vertical consensus.
+ assert(detect_samples_consensus(top,bottom,left,right,7,result)&&result.top==8&&result.left==0);left[6]=0;
  // A caption in an otherwise black border changes actual sampled edges, rejecting stability.
  for(int y=8;y<64;++y)for(int x=0;x<128;++x)image[y*128+x]=120;
  for(int x=32;x<96;++x)image[70*128+x]=200;
  edges=Edges(&frame);assert(edges.bottom==1);bottom[6]=edges.bottom;
- assert(!detect_samples_stable(top,bottom,left,right,7));bottom[6]=8;
+ assert(!detect_samples_consensus(top,bottom,left,right,7,result));bottom[6]=8;
  // Unsupported formats, resolution changes and truncated/negative strides are refused.
  frame.format=AV_PIX_FMT_RGB24;assert(!AdmitFrame(&frame,&source));
  frame.format=AV_PIX_FMT_YUV420P10BE;assert(!AdmitFrame(&frame,&source));
@@ -114,7 +185,7 @@ int main(){
  assert(!cache.GetVideoDoViFrameMetadata(std::numeric_limits<double>::infinity()).has_level5_metadata);
  assert(!cache.GetVideoDoViFrameMetadata(1e30).has_level5_metadata);
  cache.ClearVideoDoViFrameMetadata();assert(!cache.GetVideoDoViFrameMetadata(100).has_level5_metadata);
- std::cout<<"PASS: production probe pixel admission/contrast/edges/stability and exact-PTS metadata freshness\n";
+ std::cout<<"PASS: production probe pixels, paired confidence, scanner selection/AR snap and exact-PTS freshness\n";
 }
 '''
 
@@ -129,7 +200,7 @@ def run(code, negative=False):
         result = subprocess.run([str(out / 'test')], text=True, capture_output=True,
                                 env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'}, timeout=10)
         if negative:
-            assert result.returncode and 'Assertion' in result.stderr, result.stdout + result.stderr
+            assert result.returncode == -signal.SIGABRT and 'Assertion' in result.stderr and 'AddressSanitizer' not in result.stderr and 'runtime error:' not in result.stderr, result.stdout + result.stderr
         else:
             assert result.returncode == 0, result.stdout + result.stderr
             print(result.stdout.strip())
@@ -143,7 +214,13 @@ def main():
     run(code)
     if args.negative_controls:
         for label, old, new in [
-            ('mixed aspect accepted', 'if (*range.second - *range.first > 5)', 'if (false && *range.second - *range.first > 5)'),
+            ('half accepted as majority', 'if (bestSupport < count / 2 + 1)', 'if (bestSupport < (count + 1) / 2)'),
+            ('smaller/full-frame accepted', 'if (first[i] + tolerance < candidate || second[i] + tolerance < candidate)', 'if (false && (first[i] + tolerance < candidate || second[i] + tolerance < candidate))'),
+            ('bilateral mixed aspect accepted', 'if (first[i] > candidate + tolerance && second[i] > candidate + tolerance)', 'if (false && first[i] > candidate + tolerance && second[i] > candidate + tolerance)'),
+            ('joint evidence bypassed', 'std::abs(static_cast<int>(first[j]) - second[j]) <= tolerance &&\n          std::abs(static_cast<int>(first[j]) - value) <= tolerance &&\n          std::abs(static_cast<int>(second[j]) - value) <= tolerance)', 'std::abs(static_cast<int>(first[j]) - value) <= tolerance)'),
+            ('unrelated horizontal noise vetoes picture', 'uint16_t vertical = 0, horizontal = 0;', 'if (*std::max_element(left,left+count)-*std::min_element(left,left+count)>5) return false; uint16_t vertical = 0, horizontal = 0;'),
+            ('scanner discards consensus', 'detTop = consensus.top;', 'detTop = 0;'),
+            ('snap bypassed', 'detTop = tb; detBottom = tb; detLeft = 0; detRight = 0;', 'detLeft = 0; detRight = 0; (void)tb;'),
             ('dark coverage accepted', 'if (count < 6 || count > 7)', 'if (count < 1 || count > 7)'),
             ('latest metadata borrowed', '.find(static_cast<uint64_t>(pts))', '.findOrLatest(static_cast<uint64_t>(pts))'),
             ('source dimensions ignored', 'frame->width != source->width || frame->height != source->height ||', '(frame->width != source->width && false) || (frame->height != source->height && false) ||'),

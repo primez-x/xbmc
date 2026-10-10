@@ -1026,7 +1026,7 @@
             <dependency type="visible" setting="subtitles.bitmapposition" operator="is">5</dependency>
           </dependencies>
           <control type="slider" format="number">
-            <formatlabel>14047</formatlabel>
+            <formatlabel>69365</formatlabel>
           </control>
         </setting>
         <setting id="subtitles.bitmapaspect" type="integer" label="69324" help="69325">
@@ -1057,7 +1057,7 @@
           <level>1</level>
           <default>1</default>
           <constraints><minimum>0</minimum><step>0.1</step><maximum>10</maximum></constraints>
-          <control type="slider" format="number"><formatlabel>14047</formatlabel></control>
+          <control type="slider" format="number"><formatlabel>69365</formatlabel></control>
         </setting>
         <setting id="subtitles.detectactivearea" type="boolean" label="69335" help="69336">
           <requirement>HAVE_AMCODEC</requirement>

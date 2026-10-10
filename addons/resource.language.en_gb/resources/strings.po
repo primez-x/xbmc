@@ -27620,7 +27620,7 @@ msgstr ""
 #. Subtitle placement
 #: system/settings/settings.xml
 msgctxt "#69336"
-msgid "Optionally probe files during Amlogic SDR/HDR playback for stable encoded black borders. Player-added bars need no scan. Uses separate reads, seeks and software decoding and can compete with playback. Cache throttling is always applied to non-DV scans. Dark, inconsistent, variable-aspect, unsupported and unreadable sources fall back to the visible video rectangle. No live aspect tracking or Dolby metadata is produced. Changes apply on next playback."
+msgid "Optionally probe files during Amlogic SDR/HDR playback for stable encoded black borders. Player-added bars need no scan. Uses separate reads, seeks and software decoding and can compete with playback. Cache throttling is always applied to non-DV scans. Scans without supported paired border consensus, with variable framing, or with insufficient readable samples fall back to the visible video rectangle. No live aspect tracking or Dolby metadata is produced. Changes apply on next playback."
 msgstr ""
 
 #. SDR bitmap subtitle colour
@@ -27781,4 +27781,10 @@ msgstr ""
 
 msgctxt "#69364"
 msgid "6.1"
+msgstr ""
+
+#. Bitmap subtitle offset and margin (number slider)
+#: system/settings/settings.xml
+msgctxt "#69365"
+msgid "{0:.1f} %"
 msgstr ""

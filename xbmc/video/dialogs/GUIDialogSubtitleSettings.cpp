@@ -365,7 +365,7 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
   auto offset = AddSlider(
       groupSubtitles, CSettings::SETTING_SUBTITLES_BITMAPOFFSET, 69322, SettingLevel::Basic,
       CServiceBroker::GetSettingsComponent()->GetSubtitlesSettings()->GetBitmapOffset(),
-      14047, -100.0f, 0.1f, 100.0f);
+      69365, -100.0f, 0.1f, 100.0f);
   offset->SetDependencies({offsetVisible});
   offset->SetHelp(69323);
 
@@ -386,7 +386,7 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
 
   auto margin = AddSlider(groupSubtitles, CSettings::SETTING_SUBTITLES_BITMAPMARGIN, 69333,
       SettingLevel::Basic, static_cast<float>(settings->GetNumber(CSettings::SETTING_SUBTITLES_BITMAPMARGIN)),
-      14047, 0.0f, 0.1f, 10.0f);
+      69365, 0.0f, 0.1f, 10.0f);
   margin->SetHelp(69334);
 
 #if HAS_GLES >= 2

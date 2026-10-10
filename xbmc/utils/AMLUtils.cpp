@@ -2978,17 +2978,76 @@ static void detect_publish(const CAMLNativeWorker::Run& run,
   s_detectInjected.store(true);
 }
 
-static bool detect_samples_stable(const uint16_t* top, const uint16_t* bottom,
-                                  const uint16_t* left, const uint16_t* right, int count)
+enum class DetectAxisConfidence
 {
+  UNCERTAIN,
+  STABLE,
+  VARIABLE
+};
+
+static DetectAxisConfidence detect_axis_consensus(const uint16_t* first,
+                                                  const uint16_t* second,
+                                                  int count, uint16_t& border)
+{
+  constexpr int tolerance = 5; // coded pixels
+  border = 0;
+  int bestSupport = 0;
+  uint16_t candidate = 0;
+  for (int i = 0; i < count; ++i)
+  {
+    if (std::abs(static_cast<int>(first[i]) - second[i]) > tolerance)
+      continue;
+    const uint16_t value = std::min(first[i], second[i]);
+    int support = 0;
+    for (int j = 0; j < count; ++j)
+    {
+      if (std::abs(static_cast<int>(first[j]) - second[j]) <= tolerance &&
+          std::abs(static_cast<int>(first[j]) - value) <= tolerance &&
+          std::abs(static_cast<int>(second[j]) - value) <= tolerance)
+        ++support;
+    }
+    if (support > bestSupport || (support == bestSupport && value < candidate))
+    {
+      bestSupport = support;
+      candidate = value;
+    }
+  }
+  // Joint evidence from a strict majority; never synthesize an opposite edge
+  // from independent modes or reorder the original paired observations.
+  if (bestSupport < count / 2 + 1)
+    return DetectAxisConfidence::UNCERTAIN;
+  if (candidate > tolerance)
+  {
+    for (int i = 0; i < count; ++i)
+    {
+      // Smaller bounds include full-frame scenes, nonzero aspect changes and
+      // content/captions intruding into a bar. A majority cannot overrule them.
+      if (first[i] + tolerance < candidate || second[i] + tolerance < candidate)
+        return DetectAxisConfidence::VARIABLE;
+      // Both edges moving inward may be genuine narrower/asymmetric framing.
+      // Only unilateral larger estimates are tolerated as dark-scene outliers.
+      if (first[i] > candidate + tolerance && second[i] > candidate + tolerance)
+        return DetectAxisConfidence::VARIABLE;
+    }
+    border = candidate;
+  }
+  return DetectAxisConfidence::STABLE;
+}
+
+static bool detect_samples_consensus(const uint16_t* top, const uint16_t* bottom,
+                                    const uint16_t* left, const uint16_t* right,
+                                    int count, DetectResult& result)
+{
+  result = {};
   if (count < 6 || count > 7)
     return false;
-  for (const auto* samples : {top, bottom, left, right})
-  {
-    const auto range = std::minmax_element(samples, samples + count);
-    if (*range.second - *range.first > 5)
-      return false;
-  }
+  uint16_t vertical = 0, horizontal = 0;
+  const auto v = detect_axis_consensus(top, bottom, count, vertical);
+  const auto h = detect_axis_consensus(left, right, count, horizontal);
+  if (v == DetectAxisConfidence::VARIABLE || h == DetectAxisConfidence::VARIABLE ||
+      (v == DetectAxisConfidence::UNCERTAIN && h == DetectAxisConfidence::UNCERTAIN))
+    return false;
+  result = {vertical, vertical, horizontal, horizontal};
   return true;
 }
 
@@ -3176,7 +3235,6 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
     uint16_t samples_left[7] = {}, samples_right[7] = {};
     int validSamples = 0;
     int lastWidth = 0, lastHeight = 0;
-    const int agreeTolerance = 5; /* pixels */
     /* Stale-frame detection: catches broken-seek cases (format-specific
      * quirks beyond the MPEG-TS skip) where the decoder returns the same
      * frame repeatedly.  If we see identical pixel values across several
@@ -3185,28 +3243,6 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
     int staleCount = 0;
     const int maxStale = 5;
     bool staleAbort = false;
-
-    auto pickBest = [](uint16_t* v, int n) -> uint16_t {
-      uint16_t best = v[0];
-      int bestCount = 0;
-      for (int i = 0; i < n; i++) {
-        int count = 0;
-        for (int j = 0; j < n; j++)
-          if (v[j] == v[i]) count++;
-        if (count > bestCount) { bestCount = count; best = v[i]; }
-      }
-      if (bestCount >= 2) return best;
-      std::sort(v, v + n);
-      return v[n / 2];
-    };
-
-    auto countSupport = [&agreeTolerance](uint16_t* v, int n, uint16_t picked) -> int {
-      int support = 0;
-      for (int i = 0; i < n; i++)
-        if (std::abs((int)v[i] - (int)picked) <= agreeTolerance)
-          support++;
-      return support;
-    };
 
     for (int s = 0; s < numSeeks && validSamples < numSeeks; s++)
     {
@@ -3500,112 +3536,19 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
       }
     }
 
-    if (!detect_samples_stable(samples_top, samples_bottom, samples_left, samples_right, validSamples))
+    DetectResult consensus{};
+    if (!detect_samples_consensus(samples_top, samples_bottom, samples_left, samples_right,
+                                  validSamples, consensus))
     {
+      CLog::Log(LOGINFO, "DetectActiveArea: no safe paired border consensus in {} samples — "
+                "skipping uncertain or variable framing", validSamples);
       s_detectState.store(DV_DETECT_SKIP_IMAX);
       goto cleanup;
     }
-    detTop = pickBest(samples_top, validSamples);
-    detBottom = pickBest(samples_bottom, validSamples);
-
-    /* T/B consensus: require majority of valid samples.
-     * If one side has consensus but the other doesn't, use the consistent
-     * side for both — letterbox borders are symmetric by definition.
-     * If T and B independently pick the same value with 2+ support each,
-     * accept it — the corroboration is strong evidence even without
-     * individual majority (common on dark DV content).
-     * If neither has consensus, likely IMAX hybrid — bail. */
-    {
-      int required = (validSamples + 1) / 2; /* majority */
-      if (required < 2) required = 2;
-      int topSupport = countSupport(samples_top, validSamples, detTop);
-      int botSupport = countSupport(samples_bottom, validSamples, detBottom);
-      bool topOk = topSupport >= required;
-      bool botOk = botSupport >= required;
-
-      /* Corroboration: T and B independently agree → accept with 2+ each */
-      bool corroborated = !topOk && !botOk &&
-                          topSupport >= 2 && botSupport >= 2 &&
-                          std::abs((int)detTop - (int)detBottom) <= agreeTolerance;
-
-      if (corroborated)
-      {
-        /* Use the side with more support, or B if equal */
-        uint16_t agreed = (topSupport >= botSupport) ? detTop : detBottom;
-        CLog::Log(LOGDEBUG, "DetectActiveArea: T/B corroborated at {} (T={}/{} B={}/{} support)",
-                  agreed, detTop, topSupport, detBottom, botSupport);
-        detTop = detBottom = agreed;
-      }
-      else if (!topOk && !botOk && validSamples >= 3)
-      {
-        CLog::Log(LOGINFO, "DetectActiveArea: no T/B consensus (T={}/{} B={}/{} of {} needed) — skipping",
-                  detTop, topSupport, detBottom, botSupport, required);
-        s_detectState.store(DV_DETECT_SKIPPED);
-        goto cleanup;
-      }
-      else if (topOk && !botOk)
-      {
-        CLog::Log(LOGDEBUG, "DetectActiveArea: B inconsistent ({} support), using T={} for both",
-                  botSupport, detTop);
-        detBottom = detTop;
-      }
-      else if (botOk && !topOk)
-      {
-        CLog::Log(LOGDEBUG, "DetectActiveArea: T inconsistent ({} support), using B={} for both",
-                  topSupport, detBottom);
-        detTop = detBottom;
-      }
-    }
-
-    /* Variable AR check: if consensus found significant bars but any sample
-     * had no bars at all, the movie likely has IMAX/open-matte scenes mixed
-     * with scope. Reject to avoid cropping full-frame scenes.
-     * Threshold: 2.5% of frame height (~54px on 2160p). */
-    if (detTop > 0 || detBottom > 0)
-    {
-      uint16_t minSignificant = static_cast<uint16_t>(lastHeight / 40);
-      if (detTop >= minSignificant || detBottom >= minSignificant)
-      {
-        for (int i = 0; i < validSamples; i++)
-        {
-          /* Check if either side has no bar — on a real scope frame, row 0
-           * is always bar level (Y≈16), so T is always well above 0.
-           * T=0 means row 0 is content (fullscreen).  B can still show a
-           * large false value from dark content below the scan threshold,
-           * so require only one side to indicate no bar. */
-          if (samples_top[i] <= agreeTolerance || samples_bottom[i] <= agreeTolerance)
-          {
-            CLog::Log(LOGINFO, "DetectActiveArea: variable AR (sample {} T={} B={}, "
-                      "consensus T={} B={}) — skipping to avoid IMAX crop",
-                      i + 1, samples_top[i], samples_bottom[i], detTop, detBottom);
-            s_detectState.store(DV_DETECT_SKIP_IMAX);
-            goto cleanup;
-          }
-        }
-      }
-    }
-
-    detLeft = pickBest(samples_left, validSamples);
-    detRight = pickBest(samples_right, validSamples);
-
-    /* L/R: require majority support AND symmetric.
-     * Symmetry is the primary false-positive guard for pillarbox — real
-     * pillarbox is always symmetric, dark-edge artifacts are not. */
-    {
-      int lrRequired = (validSamples + 1) / 2;
-      if (lrRequired < 2) lrRequired = 2;
-      int leftSupport = countSupport(samples_left, validSamples, detLeft);
-      int rightSupport = countSupport(samples_right, validSamples, detRight);
-      if (leftSupport < lrRequired || rightSupport < lrRequired ||
-          (detLeft && detRight &&
-           std::abs((int)detLeft - (int)detRight) > (int)std::max(detLeft, detRight) / 10))
-      {
-        CLog::Log(LOGDEBUG, "DetectActiveArea: L/R rejected (support {}/{} of {} needed, "
-                  "L={} R={}) — ignoring",
-                  leftSupport, rightSupport, lrRequired, detLeft, detRight);
-        detLeft = detRight = 0;
-      }
-    }
+    detTop = consensus.top;
+    detBottom = consensus.bottom;
+    detLeft = consensus.left;
+    detRight = consensus.right;
 
     /* Validate and snap to common AR */
     if (detTop || detBottom || detLeft || detRight)
