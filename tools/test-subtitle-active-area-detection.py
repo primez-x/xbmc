@@ -16,8 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 function = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['function']
 
 
-def source():
-    aml = (ROOT / 'xbmc/utils/AMLUtils.cpp').read_text()
+def source(aml=None):
+    if aml is None:
+        aml = (ROOT / 'xbmc/utils/AMLUtils.cpp').read_text()
     scan = function(aml, 'static void DetectActiveAreaFromFile(')
     admit = scan[scan.index('        if (frame->width != source->width'):scan.index('        lastWidth = frame->width;')]
     access_start = scan.index('        const int stride = frame->linesize[0];')
@@ -30,6 +31,8 @@ def source():
     code += 'bool AdmitFrame(Frame* frame,Source* source){\n' + admit + 'return true;cleanup:return false;}\n'
     code += 'uint32_t Contrast(Frame* frame){int lastWidth=frame->width,lastHeight=frame->height;{\n'
     code += access + '(void)sampleW;(void)sampleStartX;return contrast;}cleanup:return 0;}\n'
+    if 'static uint16_t detect_refine_edge(' in aml:
+        code += 'template<typename Luma>\n' + function(aml, 'static uint16_t detect_refine_edge(') + '\n'
     code += 'Result Edges(Frame* frame){int lastWidth=frame->width,lastHeight=frame->height;\n'
     code += edges + 'return {sTop,sBottom,sLeft,sRight};}\n'
     code += re.search(r'enum class DetectAxisConfidence\s*\{.*?\};', aml, re.S).group() + '\n'

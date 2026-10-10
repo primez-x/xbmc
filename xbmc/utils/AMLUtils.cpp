@@ -3002,6 +3002,74 @@ enum class DetectAxisConfidence
   VARIABLE
 };
 
+// A bright centre can put the midpoint threshold well above dark image content
+// at an encoded bar's real edge. Refine that estimate using distributed strips
+// and a bounded departure from near-black. This can only reduce an edge: the
+// original full-frame/smaller-bound evidence must never be hidden.
+template<typename Luma>
+static uint16_t detect_refine_edge(const Luma& getY, int width, int height,
+                                   bool vertical, bool reverse, uint16_t original)
+{
+  if (original == 0)
+    return original;
+  constexpr int lanes = 9;
+  constexpr int tolerance = 5;
+  const int length = vertical ? height : width;
+  const int cross = vertical ? width : height;
+  const int strip = std::min(64, cross / 2);
+  uint16_t edges[lanes];
+  uint16_t earliest = original;
+  for (int lane = 0; lane < lanes; ++lane)
+  {
+    const int start = lane * (cross - strip) / (lanes - 1);
+    auto average = [&](int depth) -> uint32_t {
+      const int pos = reverse ? length - 1 - depth : depth;
+      uint32_t sum = 0;
+      for (int i = 0; i < strip; ++i)
+        sum += vertical ? getY(pos, start + i) : getY(start + i, pos);
+      return sum / strip;
+    };
+    const uint32_t border = average(0);
+    edges[lane] = UINT16_MAX;
+    // A bright outer strip is direct full-frame/bar-intrusion evidence.
+    if (border > 24)
+      return 0;
+    for (int depth = 1; depth < original; ++depth)
+    {
+      // Six 8-bit luma codes tolerate compressed black without making the
+      // threshold depend on an unrelated bright object at the frame centre.
+      if (average(depth) > border + 6)
+      {
+        if (edges[lane] == UINT16_MAX)
+        {
+          edges[lane] = static_cast<uint16_t>(depth);
+          earliest = std::min(earliest, edges[lane]);
+        }
+      }
+      // A caption or compression stripe can span several strips. Returning
+      // to near-black before the original edge contradicts a sustained image
+      // boundary; fail closed instead of hiding genuine larger framing.
+      else if (edges[lane] != UINT16_MAX)
+        return 0;
+    }
+  }
+  if (earliest == original)
+    return original;
+  int support = 0;
+  for (const auto edge : edges)
+    if (edge <= earliest + tolerance)
+      ++support;
+  // Require the centre strip to corroborate the distributed departure too:
+  // side graphics touching the picture can persist through a genuinely wider
+  // bar without a return to black. Unsupported earlier content is veto evidence.
+  if (edges[lanes / 2] > earliest + tolerance)
+    return 0;
+  // Distributed agreement supports a shallower boundary. A lone smaller
+  // departure could be a caption/object in a bar: leave no positive crop on
+  // this edge rather than allowing the centre estimate to erase that evidence.
+  return support >= 3 ? earliest : 0;
+}
+
 static DetectAxisConfidence detect_axis_consensus(const uint16_t* first,
                                                   const uint16_t* second,
                                                   int count, uint16_t& border)
@@ -3488,6 +3556,11 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
           if (sum / sampleH > lrThreshold) { sRight = static_cast<uint16_t>(lastWidth - 1 - col); break; }
         }
       }
+
+      sTop = detect_refine_edge(getY, lastWidth, lastHeight, true, false, sTop);
+      sBottom = detect_refine_edge(getY, lastWidth, lastHeight, true, true, sBottom);
+      sLeft = detect_refine_edge(getY, lastWidth, lastHeight, false, false, sLeft);
+      sRight = detect_refine_edge(getY, lastWidth, lastHeight, false, true, sRight);
 
       samples_top[validSamples] = sTop;
       samples_bottom[validSamples] = sBottom;
