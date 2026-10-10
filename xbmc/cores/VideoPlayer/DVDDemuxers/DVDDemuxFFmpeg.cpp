@@ -720,6 +720,7 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
 
 void CDVDDemuxFFmpeg::Dispose()
 {
+  m_seekRejectedWithoutChange = false;
   m_seamReadOffsets.clear();
   m_seamReadEnd = 0;
   m_pkt.result = -1;
@@ -762,6 +763,7 @@ bool CDVDDemuxFFmpeg::Reset()
 
 void CDVDDemuxFFmpeg::Flush()
 {
+  m_seekRejectedWithoutChange = false;
   m_seamReadOffsets.clear();
   m_seamReadEnd = 0;
   if (m_pFormatContext)
@@ -1403,8 +1405,32 @@ DemuxPacket* CDVDDemuxFFmpeg::Read()
   return ReadInternal(false);
 }
 
+bool CDVDDemuxFFmpeg::IsAVISeekBeforeFirstKeyframe(int64_t seekPts)
+{
+  const int streamIndex = m_seekStream < 0 ? av_find_default_stream_index(m_pFormatContext)
+                                          : m_seekStream;
+  if (streamIndex < 0 || static_cast<unsigned int>(streamIndex) >= m_pFormatContext->nb_streams)
+    return false;
+
+  AVStream* stream = m_pFormatContext->streams[streamIndex];
+  // Ordinary AVI video indexes use stream ticks (sample_size == 0). Type-1
+  // DV uses private AVI scale/rate conversion instead; leave it to FFmpeg.
+  if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO ||
+      stream->codecpar->codec_id == AV_CODEC_ID_DVVIDEO || stream->time_base.num <= 0 ||
+      stream->time_base.den <= 0 || avformat_index_get_entries_count(stream) == 0)
+    return false;
+
+  const int64_t timestamp = m_seekStream < 0
+                                ? av_rescale(seekPts, stream->time_base.den,
+                                             AV_TIME_BASE * static_cast<int64_t>(stream->time_base.num))
+                                : seekPts;
+  return av_index_search_timestamp(stream, timestamp, AVSEEK_FLAG_BACKWARD) < 0 &&
+         av_index_search_timestamp(stream, timestamp, 0) >= 0;
+}
+
 bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
 {
+  m_seekRejectedWithoutChange = false;
   bool hitEnd = false;
 
   if (!m_pInput)
@@ -1416,12 +1442,11 @@ bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
     hitEnd = true;
   }
 
-  m_pkt.result = -1;
-  av_packet_unref(&m_pkt.pkt);
-
   CDVDInputStream::IPosTime* ist = m_pInput->GetIPosTime();
   if (ist)
   {
+    m_pkt.result = -1;
+    av_packet_unref(&m_pkt.pkt);
     if (!ist->PosTime(static_cast<int>(time)))
       return false;
 
@@ -1429,10 +1454,38 @@ bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
       *startpts = DVD_NOPTS_VALUE;
 
     Flush();
-
     return true;
   }
-  else if (m_pSSIF)
+
+  if (!hitEnd && backwards && m_bAVI && !m_bSup && !m_checkTransportStream && !m_pSSIF &&
+      m_pFormatContext &&
+      !m_brokenFileDetected && !Aborted() && !m_pInput->IsEOF() &&
+      !m_pInput->IsStreamType(DVDSTREAM_TYPE_DVD) &&
+      !m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+      (m_pFormatContext->duration <= 0 || time < m_pFormatContext->duration / 1000.0))
+  {
+    std::unique_lock<CCriticalSection> lock(m_critSection);
+    int64_t seek_pts = static_cast<int64_t>(time) * (AV_TIME_BASE / 1000);
+    if (m_pFormatContext->start_time != AV_NOPTS_VALUE)
+      seek_pts += m_pFormatContext->start_time;
+    if (IsAVISeekBeforeFirstKeyframe(seek_pts))
+    {
+      // FFmpeg flushes parser packets before avi_read_seek and can move to the
+      // index tail in generic fallback even when the seek eventually fails.
+      // Conservatively refuse this early indexed-key gap before any mutation.
+      // Empty indexes still get the normal opportunity to acquire seek entries.
+      CLog::Log(LOGDEBUG, "{} - AVI target {} precedes the first indexed keyframe; "
+                         "keeping playback position without attempting seek",
+                __FUNCTION__, time);
+      m_seekRejectedWithoutChange = true;
+      return false;
+    }
+  }
+
+  m_pkt.result = -1;
+  av_packet_unref(&m_pkt.pkt);
+
+  if (m_pSSIF)
     m_pSSIF->Flush();
 
   if (!m_pInput->Seek(0, SEEK_POSSIBLE) &&
@@ -1524,6 +1577,8 @@ bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
 
     if (ret < 0)
     {
+      CLog::Log(LOGDEBUG, "{} - av_seek_frame failed ({}) for stream {} at target {}",
+                __FUNCTION__, ret, m_seekStream, seek_pts);
       int64_t starttime = m_pFormatContext->start_time;
       if (m_checkTransportStream)
       {
@@ -1573,7 +1628,10 @@ bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
     }
   }
 
-  if (m_currentPts == DVD_NOPTS_VALUE)
+  if (ret < 0)
+    CLog::Log(LOGDEBUG, "{} - seek failed; current read-ahead PTS {} is not a seek landing",
+              __FUNCTION__, m_currentPts);
+  else if (m_currentPts == DVD_NOPTS_VALUE)
     CLog::Log(LOGDEBUG, "{} - unknown position after seek", __FUNCTION__);
   else
     CLog::Log(LOGDEBUG, "{} - seek ended up on time {}", __FUNCTION__,
@@ -1596,6 +1654,7 @@ bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
 
 bool CDVDDemuxFFmpeg::SeekByte(int64_t pos)
 {
+  m_seekRejectedWithoutChange = false;
   std::unique_lock<CCriticalSection> lock(m_critSection);
   int ret = av_seek_frame(m_pFormatContext, -1, pos, AVSEEK_FLAG_BYTE);
 

@@ -303,6 +303,10 @@ public:
    */
   virtual bool SeekTime(double time, bool backwards = false, double* startpts = NULL) = 0;
 
+  // Only true when the last SeekTime rejected the request without changing
+  // demux/packet/input state. A negative library seek result alone is unsafe.
+  virtual bool WasSeekRejectedWithoutChange() const { return false; }
+
   /*
    * Edition stream
    */

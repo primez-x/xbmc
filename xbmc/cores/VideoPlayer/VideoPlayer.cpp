@@ -3869,14 +3869,16 @@ void CVideoPlayer::HandleMessages()
         }
       }
 
+      const ECacheState cacheStateBeforeSeek = m_caching;
       if (!msg.GetTrickPlay())
       {
         m_processInfo->SeekFinished(0);
         SetCaching(CACHESTATE_FLUSH);
       }
 
-      // A time seek moves playback away from any pending chapter target.
-      m_chapterSeekTarget = 0;
+      // Restore the pending chapter on unchanged rejection only if a newer
+      // chapter request has not arrived while the demuxer was checking the seek.
+      const int chapterTargetBeforeSeek = m_chapterSeekTarget.exchange(0);
 
       double start = DVD_NOPTS_VALUE;
 
@@ -3927,6 +3929,16 @@ void CVideoPlayer::HandleMessages()
           RecallSubtitlesAfterSeek(start, time);
           FinishSeek(trickplay);
         });
+      }
+      else if (m_pDemuxer && m_pDemuxer->WasSeekRejectedWithoutChange())
+      {
+        CLog::Log(LOGDEBUG, "VideoPlayer: seek rejected without changing demux state; "
+                           "keeping queued playback");
+        int expectedChapterTarget = 0;
+        m_chapterSeekTarget.compare_exchange_strong(expectedChapterTarget, chapterTargetBeforeSeek);
+        if (!msg.GetTrickPlay())
+          SetCaching(cacheStateBeforeSeek);
+        FinishSeek(msg.GetTrickPlay());
       }
       else if (m_pDemuxer)
       {

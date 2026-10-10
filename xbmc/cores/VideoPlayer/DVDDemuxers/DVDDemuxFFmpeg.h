@@ -98,6 +98,7 @@ public:
   DemuxPacket* ReadInternal(bool keep);
 
   bool SeekTime(double time, bool backwards = false, double* startpts = NULL) override;
+  bool WasSeekRejectedWithoutChange() const override { return m_seekRejectedWithoutChange; }
   bool SeekByte(int64_t pos);
   int GetStreamLength() override;
   CDemuxStream* GetStream(int iStreamId) const override;
@@ -147,6 +148,7 @@ protected:
   AVDictionary* GetFFMpegOptionsFromInput();
   double ConvertTimestamp(int64_t pts, int den, int num);
   void ApplySeamTimeOffset(DemuxPacket* packet, int streamIndex);
+  bool IsAVISeekBeforeFirstKeyframe(int64_t seekPts);
   bool IsProgramChange();
   unsigned int HLSSelectProgram();
 
@@ -199,6 +201,7 @@ protected:
   int m_displayTime = 0;
   double m_dtsAtDisplayTime;
   bool m_seekToKeyFrame = false;
+  bool m_seekRejectedWithoutChange = false;
   double m_startTime = 0;
   bool m_dv_dual_stream = false;
   bool m_dv_dual_stream_started = false;
