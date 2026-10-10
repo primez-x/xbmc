@@ -213,16 +213,14 @@ COverlayTextureGLES::PreparedImage COverlayTextureGLES::PrepareImage(
       const size_t count = static_cast<size_t>(o.width) * o.height;
       std::vector<uint32_t> pma(count);
       const uint32_t* src = reinterpret_cast<const uint32_t*>(o.pixels.data());
+      const auto& table = OVERLAY::GetLinearPremultiplyTable();
       for (size_t i = 0; i < count; i++)
       {
         const uint32_t a = (src[i] >> PIXEL_ASHIFT) & 0xff;
-        const float af = a / 255.0f;
-        const int rp = OVERLAY::LinearToSrgb8(
-            OVERLAY::SrgbToLinear((src[i] >> PIXEL_RSHIFT) & 0xff) * af);
-        const int gp = OVERLAY::LinearToSrgb8(
-            OVERLAY::SrgbToLinear((src[i] >> PIXEL_GSHIFT) & 0xff) * af);
-        const int bp = OVERLAY::LinearToSrgb8(
-            OVERLAY::SrgbToLinear((src[i] >> PIXEL_BSHIFT) & 0xff) * af);
+        const auto& channels = table[a];
+        const int rp = channels[(src[i] >> PIXEL_RSHIFT) & 0xff];
+        const int gp = channels[(src[i] >> PIXEL_GSHIFT) & 0xff];
+        const int bp = channels[(src[i] >> PIXEL_BSHIFT) & 0xff];
         pma[i] = (a << PIXEL_ASHIFT) | (rp << PIXEL_RSHIFT) | (gp << PIXEL_GSHIFT) |
                  (bp << PIXEL_BSHIFT);
       }

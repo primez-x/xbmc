@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <stdint.h>
 #include <stdlib.h>
 #include <vector>
@@ -42,6 +43,10 @@ struct SQuads
 // These helpers perform the multiplication in linear space (gamma 2.2).
 float SrgbToLinear(int v);
 int LinearToSrgb8(float v);
+
+// Exact linear-light premultiplication for 8-bit channels, indexed by alpha,
+// then channel. Initialized on first use and retained as immutable CPU data.
+const std::array<std::array<uint8_t, 256>, 256>& GetLinearPremultiplyTable();
 
 // linearLight false: plain premultiply, for an overlay blended as drawn (see
 // COverlayTextureGLES).

@@ -42,6 +42,22 @@ int LinearToSrgb8(float v)
   return static_cast<int>(std::pow(v, 1.0f / 2.2f) * 255.0f + 0.5f);
 }
 
+const std::array<std::array<uint8_t, 256>, 256>& GetLinearPremultiplyTable()
+{
+  static const auto table = []() {
+    std::array<std::array<uint8_t, 256>, 256> result{};
+    for (size_t alpha = 0; alpha < result.size(); ++alpha)
+    {
+      const float af = static_cast<float>(alpha) / 255.0f;
+      for (size_t channel = 0; channel < result[alpha].size(); ++channel)
+        result[alpha][channel] = static_cast<uint8_t>(
+            LinearToSrgb8(SrgbToLinear(static_cast<int>(channel)) * af));
+    }
+    return result;
+  }();
+  return table;
+}
+
 // Premultiply alpha in linear light so semi-transparent edges don't appear dark
 // on HDR displays (where gamma-space PMA gets mapped to very low PQ luminance).
 // Also improves SDR correctness for anti-aliased overlay edges.

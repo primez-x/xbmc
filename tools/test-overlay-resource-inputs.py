@@ -28,7 +28,9 @@ def harness():
     code = code.replace('@TOKEN_METHODS@', '\n'.join(function(base, name) for name in [
         'RenderTargetToken CaptureRenderTarget()', 'bool IsRenderTargetCurrent(', 'void InvalidateRenderTarget()']))
     code += '\nnamespace OVERLAY {\n'
-    for name in ['float SrgbToLinear(', 'int LinearToSrgb8(', 'static uint32_t build_rgba(int a,',
+    for name in ['float SrgbToLinear(', 'int LinearToSrgb8(',
+                 'const std::array<std::array<uint8_t, 256>, 256>& GetLinearPremultiplyTable(',
+                 'static uint32_t build_rgba(int a,',
                  'void convert_rgba(const CDVDOverlayImage&']:
         code += function(util, name) + '\n'
     code += '}\n' + function(source, 'uint32_t PremultiplyPlain(')
