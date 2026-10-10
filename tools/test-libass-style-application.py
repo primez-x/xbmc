@@ -82,9 +82,11 @@ void ass_set_selective_style_override(ASS_Renderer* renderer, ASS_Style* value)
 {
   ++renderer->selectCalls;
   free(renderer->selected.Name); free(renderer->selected.FontName);
-  // Record the temporary native style and retain its allocations for fixture
-  // cleanup. This is not a claim about libass's allocation/ownership contract.
+  // Snapshot submitted strings; the adapted style remains track-owned.
+  // Real libass copies FontName. The fixture also owns its recorded Name.
   renderer->selected=*value;
+  renderer->selected.Name=value->Name ? strdup(value->Name) : nullptr;
+  renderer->selected.FontName=value->FontName ? strdup(value->FontName) : nullptr;
 }
 void ass_set_selective_style_override_enabled(ASS_Renderer* renderer, int flags)
 { ++renderer->enableCalls; renderer->flags=flags; }
@@ -133,7 +135,8 @@ int main()
   near(result.Outline,3); near(result.Shadow,4.5); near(result.Blur,4);
   assert(result.MarginL==30 && result.MarginR==30 && result.MarginV==120);
   assert(result.Alignment==(VALIGN_SUB|HALIGN_CENTER));
-  assert(adapted.renderer.selectCalls==0 && adapted.renderer.enableCalls==0);
+  assert(adapted.renderer.selectCalls==1 && adapted.renderer.enableCalls==1);
+  assert(adapted.renderer.flags==ASS_OVERRIDE_DEFAULT);
 
   // Replacing a published const style neither mutates nor consumes its predecessor.
   input.fontName="Custom face"; input.fontSize=24;

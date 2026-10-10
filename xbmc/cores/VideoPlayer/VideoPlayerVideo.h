@@ -174,6 +174,14 @@ protected:
   CDVDMessageQueue m_messageQueue;
   CDVDMessageQueue& m_messageParent;
   CDVDStreamInfo m_hints;
+#if defined(HAS_LIBAMCODEC)
+  void UpdateSubtitleProbe(const VideoPicture& picture);
+  void ResetSubtitleProbe();
+  void StopSubtitleProbe();
+  std::shared_ptr<const void> m_subtitleProbeSource;
+  unsigned int m_subtitleProbeWidth{0};
+  unsigned int m_subtitleProbeHeight{0};
+#endif
   int m_iSubtitlePlane{0}; ///< 3D MVC subtitle depth plane (ss_offset_sequence_id)
   std::unique_ptr<CDVDVideoCodec> m_pVideoCodec;
   std::shared_ptr<CDVDMsg> m_pendingResetMessage;

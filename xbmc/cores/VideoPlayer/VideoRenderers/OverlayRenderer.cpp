@@ -616,8 +616,8 @@ void CRenderer::SetActivePicture(const CRect& area, bool restrictToArea, bool ap
   std::unique_lock<CCriticalSection> lock(m_section);
   m_activePicture = area;
   m_restrictToActivePicture = restrictToArea && !area.IsEmpty();
-  SetActiveAreaOffsets(m_restrictToActivePicture ? std::max(0, static_cast<int>(area.y1 - m_rv.y1)) : 0,
-      m_restrictToActivePicture ? std::max(0, static_cast<int>(m_rv.y2 - area.y2)) : 0, applyUserPos);
+  SetActiveAreaOffsets(m_restrictToActivePicture ? std::max(0, static_cast<int>(std::ceil(area.y1 - m_rv.y1))) : 0,
+      m_restrictToActivePicture ? std::max(0, static_cast<int>(std::ceil(m_rv.y2 - area.y2))) : 0, applyUserPos);
 }
 
 void CRenderer::SetVideoRect(CRect &source, CRect &dest, CRect &view)
@@ -878,10 +878,10 @@ std::shared_ptr<COverlay> CRenderer::ConvertLibass(
       rOpts.horizontalAlignment = SUBTITLES::STYLE::HorizontalAlign::CENTER;
   }
 
-  // DV L5 active area: restrict subtitles to the active content area.
+  // Shared active picture: restrict supported text to the content area.
   // Uses style MarginV to push subs inside the L5 boundaries, keeping the
   // full rendering canvas intact (no font/border/shadow distortion).
-  if (m_activeAreaTopOffset > 0 || m_activeAreaBottomOffset > 0)
+  if (!o.IsForcedMargins() && (m_activeAreaTopOffset > 0 || m_activeAreaBottomOffset > 0))
   {
     rOpts.marginsMode = SUBTITLES::STYLE::MarginsMode::INSIDE_ACTIVE_AREA;
     rOpts.activeAreaTopMargin = m_activeAreaTopOffset;

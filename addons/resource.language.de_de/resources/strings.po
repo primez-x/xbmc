@@ -19369,8 +19369,8 @@ msgid "Restrict subtitles to active picture"
 msgstr "Untertitel auf den aktiven Bildbereich begrenzen"
 
 msgctxt "#60191"
-msgid "Constrain bitmap subtitles horizontally and vertically and text subtitles vertically to the visible picture, refined by native Dolby Vision L5 or valid detected borders. Applies to SDR, HDR and Dolby Vision. Player-added bars need no detection. Oversized bitmap dialogue keeps its size and may extend beyond the picture. This setting does not enable scanning or change Dolby signaling."
-msgstr "Bitmap-Untertitel horizontal und vertikal sowie Textuntertitel vertikal auf das sichtbare Bild begrenzen, präzisiert durch native Dolby-Vision-L5-Daten oder gültige erkannte Ränder. Gilt für SDR, HDR und Dolby Vision. Vom Player hinzugefügte Ränder benötigen keine Erkennung. Zu große Bitmap-Dialogblöcke behalten ihre Größe und können über das Bild hinausragen. Diese Einstellung aktiviert keine Analyse und verändert nicht die Dolby-Signalisierung."
+msgid "Constrain bitmap subtitles horizontally and vertically and adapted text subtitles vertically to the visible picture, refined by native Dolby Vision L5 or valid detected borders. Applies to SDR, HDR and Dolby Vision. Player-added bars need no detection. Authored ASS positions and forced margins are preserved. Oversized dialogue keeps its size and may extend beyond the picture. This setting does not enable scanning or change Dolby signaling."
+msgstr "Bitmap-Untertitel horizontal und vertikal sowie angepasste Textuntertitel vertikal auf das sichtbare Bild begrenzen, präzisiert durch native Dolby-Vision-L5-Daten oder gültige erkannte Ränder. Gilt für SDR, HDR und Dolby Vision. Vom Player hinzugefügte Ränder benötigen keine Erkennung. Vorgegebene ASS-Positionen und erzwungene Ränder bleiben erhalten. Zu große Dialogblöcke behalten ihre Größe und können über das Bild hinausragen. Diese Einstellung aktiviert keine Analyse und verändert nicht die Dolby-Signalisierung."
 
 msgctxt "#60192"
 msgid "Apply configured subtitle margin"

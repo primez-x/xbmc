@@ -27,7 +27,8 @@ public:
   // Supply unchangedBitmaps only for the handler's immediately preceding output
   // when libass reports identical content (changes == 0 or position-only == 1).
   explicit CLibassRenderResult(const ASS_Image* images,
-                              const CLibassRenderResult* unchangedBitmaps = nullptr);
+                              const CLibassRenderResult* unchangedBitmaps = nullptr,
+                              int verticalOffset = 0);
   ~CLibassRenderResult();
 
   CLibassRenderResult(const CLibassRenderResult&) = delete;

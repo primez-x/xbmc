@@ -19,6 +19,9 @@
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/MathUtils.h"
+#if defined(HAS_LIBAMCODEC)
+#include "utils/AMLUtils.h"
+#endif
 #include "threads/PerformanceCores.h"
 #include "utils/PlaybackDiagnostics.h"
 #include "utils/log.h"
@@ -101,6 +104,9 @@ CVideoPlayerVideo::~CVideoPlayerVideo()
 {
   m_bAbortOutput = true;
   StopThread();
+#if defined(HAS_LIBAMCODEC)
+  StopSubtitleProbe();
+#endif
 }
 
 double CVideoPlayerVideo::GetOutputDelay()
@@ -247,6 +253,9 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
   else
     m_fForcedAspectRatio = 0.0f;
 
+#if defined(HAS_LIBAMCODEC)
+  StopSubtitleProbe(); // retire the installed software route before codec replacement
+#endif
   if (m_pVideoCodec && m_pVideoCodec->Reconfigure(hint))
   {
     // reuse old decoder
@@ -309,6 +318,9 @@ void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
     request->state = CVideoFlushRequest::State::CANCELLED;
   m_pendingResetMessage.reset();
   m_pendingRecoveryDiscard = false;
+#if defined(HAS_LIBAMCODEC)
+  StopSubtitleProbe(); // video thread has retired; no new software startup can race this join
+#endif
   m_pVideoCodec.reset();
   m_mpeg2LastPacket.reset();
   m_mpeg2Cadence.Reset(false, 0.0, false, MPEG2NowMs());
@@ -564,7 +576,12 @@ void CVideoPlayerVideo::Process()
     {
       m_isEOS = false;
       if (m_pVideoCodec && !continuingReset)
+      {
+#if defined(HAS_LIBAMCODEC)
+        ResetSubtitleProbe();
+#endif
         m_pVideoCodec->Reset();
+      }
       if (m_pVideoCodec && m_pVideoCodec->LifecyclePending())
       {
         m_pendingResetMessage = pMsg;
@@ -592,7 +609,12 @@ void CVideoPlayerVideo::Process()
       m_syncEpoch = std::static_pointer_cast<CDVDMsgStreamFlush>(pMsg)->epoch;
       bool sync = std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value;
       if (m_pVideoCodec && !continuingReset)
+      {
+#if defined(HAS_LIBAMCODEC)
+        ResetSubtitleProbe();
+#endif
         m_pVideoCodec->Reset();
+      }
       if (m_pVideoCodec && m_pVideoCodec->LifecyclePending())
       {
         m_pendingResetMessage = pMsg;
@@ -896,6 +918,9 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       SendMessage(msg, 10);
     }
 
+#if defined(HAS_LIBAMCODEC)
+    ResetSubtitleProbe();
+#endif
     m_pVideoCodec->Reset();
     if (m_pVideoCodec->LifecyclePending())
     {
@@ -919,6 +944,9 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       SendMessage(msg, 10);
     }
 
+#if defined(HAS_LIBAMCODEC)
+    StopSubtitleProbe();
+#endif
     m_pVideoCodec->Reopen();
     if (m_pVideoCodec->LifecyclePending())
     {
@@ -1284,6 +1312,53 @@ OVERLAY::CRenderer::OverlayBatch CVideoPlayerVideo::ProcessOverlays(const VideoP
   return batch;
 }
 
+#if defined(HAS_LIBAMCODEC)
+void CVideoPlayerVideo::UpdateSubtitleProbe(const VideoPicture& picture)
+{
+  // ProcessInfo can already describe a prospective codec queued by the player.
+  // Use the installed decoder after format negotiation, never that shared flag.
+  auto* softwareCodec = dynamic_cast<CDVDVideoCodecFFmpeg*>(m_pVideoCodec.get());
+  if (!softwareCodec || softwareCodec->GetHWAccel() ||
+      m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+  {
+    StopSubtitleProbe(); // format renegotiation may change the installed decoder route
+    return;
+  }
+  if (m_subtitleProbeSource == m_hints.subtitleProbeSource &&
+      m_subtitleProbeWidth == picture.iWidth && m_subtitleProbeHeight == picture.iHeight)
+    return;
+  if (!aml_subtitle_active_area_configure(picture.iWidth, picture.iHeight, false, true,
+                                        m_hints.subtitleProbeSource))
+    return;
+  m_subtitleProbeSource = m_hints.subtitleProbeSource;
+  m_subtitleProbeWidth = picture.iWidth;
+  m_subtitleProbeHeight = picture.iHeight;
+  aml_dv_detect_active_area_start(); // generic geometry only; existing opt-in/throttle/eligibility
+}
+
+void CVideoPlayerVideo::ResetSubtitleProbe()
+{
+  if (m_subtitleProbeSource && m_subtitleProbeSource == aml_subtitle_active_area_source())
+    aml_subtitle_active_area_invalidate(true);
+  // The next configured decoded picture must restart a cancelled run, including
+  // when a flush arrived before any file-wide geometry had been accepted.
+  m_subtitleProbeWidth = 0;
+  m_subtitleProbeHeight = 0;
+}
+
+void CVideoPlayerVideo::StopSubtitleProbe()
+{
+  if (m_subtitleProbeSource && m_subtitleProbeSource == aml_subtitle_active_area_source())
+  {
+    aml_dv_detect_active_area_stop(); // supersede, cancel/join, then clear source geometry
+    aml_subtitle_active_area_configure(0, 0, false, false, m_subtitleProbeSource);
+  }
+  m_subtitleProbeSource.reset();
+  m_subtitleProbeWidth = 0;
+  m_subtitleProbeHeight = 0;
+}
+#endif
+
 CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPicture* pPicture)
 {
   m_bAbortOutput = false;
@@ -1317,6 +1392,10 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
     CLog::Log(LOGERROR, "{} - failed to configure renderer", __FUNCTION__);
     return OUTPUT_ABORT;
   }
+
+#if defined(HAS_LIBAMCODEC)
+  UpdateSubtitleProbe(*pPicture);
+#endif
 
   //try to calculate the framerate
   m_ptsTracker.Add(pPicture->pts);

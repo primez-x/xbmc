@@ -198,9 +198,9 @@ int main(){
     double expected=0;
     if(manual){double height=halfOu?2160:1080;expected=100-780/(height-current->marginVertical/720.0*height)*100;}
     else if(!forced&&align==SUBTITLES::Align::BOTTOM_OUTSIDE)expected=100-834/1080.0*100;
-    if(l5){mode=S::MarginsMode::INSIDE_ACTIVE_AREA;expected=0;}
+    if(l5&&!forced){mode=S::MarginsMode::INSIDE_ACTIVE_AREA;expected=0;}
     assert(opts.marginsMode==mode&&std::fabs(opts.position-expected)<1e-10);
-    assert(opts.activeAreaTopMargin==(l5?80:0)&&opts.activeAreaBottomMargin==(l5?90:0)&&opts.activeAreaApplyUserPos==l5);
+    assert(opts.activeAreaTopMargin==(l5&&!forced?80:0)&&opts.activeAreaBottomMargin==(l5&&!forced?90:0)&&opts.activeAreaApplyUserPos==(l5&&!forced));
     assert(opts.horizontalAlignment==(textAlign?static_cast<S::HorizontalAlign>(static_cast<int>(horizontal)+1):S::HorizontalAlign::DISABLED));
   }
   // Calibration/service callback may replace the member after request entry.

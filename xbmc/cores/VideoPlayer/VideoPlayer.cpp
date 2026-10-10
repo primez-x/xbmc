@@ -2965,7 +2965,7 @@ void CVideoPlayer::SynchronizeStreams(bool allowRecovery)
       {
         m_VideoPlayerAudio->AcceptsData();
         CLog::Log(LOGWARNING, "VideoPlayer::Sync - stream player video does not start, flushing buffers");
-        FlushBuffers(DVD_NOPTS_VALUE, true, true);
+        FlushBuffers(DVD_NOPTS_VALUE, true, true, {}, true);
       }
     }
   }
@@ -3085,7 +3085,7 @@ void CVideoPlayer::HandlePlaySpeed()
               mode.accurate = true;
               mode.sync = true;
               m_messenger.Put(std::make_shared<CDVDMsgPlayerSeek>(mode));
-            });
+            }, true);
             return;
           }
         }
@@ -3159,7 +3159,7 @@ void CVideoPlayer::HandlePlaySpeed()
             mode.accurate = true;
             mode.sync = true;
             m_messenger.Put(std::make_shared<CDVDMsgPlayerSeek>(mode));
-          });
+          }, true);
           return;
         }
       }
@@ -3928,7 +3928,7 @@ void CVideoPlayer::HandleMessages()
           m_subtitleSeekNewRun = true;
           RecallSubtitlesAfterSeek(start, time);
           FinishSeek(trickplay);
-        });
+        }, true);
       }
       else if (m_pDemuxer && m_pDemuxer->WasSeekRejectedWithoutChange())
       {
@@ -3954,7 +3954,7 @@ void CVideoPlayer::HandleMessages()
           if (m_playSpeed != DVD_PLAYSPEED_PAUSE)
             SetPlaySpeed(DVD_PLAYSPEED_NORMAL);
           FinishSeek(trickplay);
-        });
+        }, true);
       }
       else
         FinishSeek(msg.GetTrickPlay());
@@ -3978,7 +3978,7 @@ void CVideoPlayer::HandleMessages()
           const int offset = DVD_TIME_TO_MSEC(start) - static_cast<int>(beforeSeek);
           m_callback.OnPlayBackSeekChapter(chapter);
           m_processInfo->SeekFinished(offset);
-        });
+        }, true);
       }
       else if (m_pInputStream)
       {
@@ -3990,7 +3990,7 @@ void CVideoPlayer::HandleMessages()
             const int offset = DVD_TIME_TO_MSEC(start) - static_cast<int>(beforeSeek);
             m_callback.OnPlayBackSeekChapter(chapter);
             m_processInfo->SeekFinished(offset);
-          });
+          }, true);
         }
       }
       if (!ParentLifecyclePending())
@@ -5454,10 +5454,11 @@ bool CVideoPlayer::CloseStream(CCurrentStream& current, bool bWaitForBuffers)
   return true;
 }
 
-void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete)
+void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete,
+                               bool preserveSubtitleGeometry)
 {
 #if defined(HAS_LIBAMCODEC)
-  aml_subtitle_active_area_invalidate();
+  aml_subtitle_active_area_invalidate(preserveSubtitleGeometry);
 #endif
   m_vs10Action.Suspend();
   if (m_pendingFlush)
@@ -5468,7 +5469,7 @@ void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync, std::funct
       m_bAbortRequest = true;
       return;
     }
-    m_deferredFlush = DeferredFlush{pts, accurate, sync, std::move(complete)};
+    m_deferredFlush = DeferredFlush{pts, accurate, sync, std::move(complete), preserveSubtitleGeometry};
     return;
   }
   m_pendingFlush.emplace();
@@ -5614,7 +5615,8 @@ bool CVideoPlayer::ContinueParentLifecycle()
     {
       auto deferred = std::move(*m_deferredFlush);
       m_deferredFlush.reset();
-      FlushBuffers(deferred.pts, deferred.accurate, deferred.sync, std::move(deferred.complete));
+      FlushBuffers(deferred.pts, deferred.accurate, deferred.sync, std::move(deferred.complete),
+                   deferred.preserveSubtitleGeometry);
       return false;
     }
   }

@@ -23,6 +23,7 @@
 #include "utils/log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -57,10 +58,45 @@ bool RenderOptsEqual(const renderOpts& a, const renderOpts& b)
          a.activeAreaApplyUserPos == b.activeAreaApplyUserPos;
 }
 
+// Fit actual rasterized extents, including outlines/shadows, without changing
+// libass's full canvas, font metrics, bitmap pixels or inter-line arrangement.
+int ActiveAreaTextOffset(const ASS_Image* images, const renderOpts& opts,
+                         const style& subStyle)
+{
+  if (opts.marginsMode != MarginsMode::INSIDE_ACTIVE_AREA || opts.frameHeight <= 0.0f ||
+      !std::isfinite(opts.frameHeight))
+    return 0;
+  int top = std::numeric_limits<int>::max();
+  int bottom = std::numeric_limits<int>::min();
+  for (const ASS_Image* image = images; image; image = image->next)
+  {
+    if (!image->bitmap || image->w <= 0 || image->h <= 0 || (image->color & 0xff) == 0xff)
+      continue;
+    top = std::min(top, image->dst_y);
+    bottom = std::max(bottom, image->dst_y + image->h);
+  }
+  if (bottom <= top)
+    return 0;
+  const double activeHeight = std::max(0.0, static_cast<double>(opts.frameHeight) -
+      opts.activeAreaTopMargin - opts.activeAreaBottomMargin);
+  if (activeHeight <= 0.0)
+    return 0;
+  const double padding = opts.activeAreaApplyUserPos ?
+      std::max(0.0, static_cast<double>(subStyle.marginVertical) * activeHeight / 720.0) : 0.0;
+  const int low = static_cast<int>(std::ceil(opts.activeAreaTopMargin + padding));
+  const int high = static_cast<int>(std::floor(static_cast<double>(opts.frameHeight) -
+      opts.activeAreaBottomMargin - padding));
+  // Oversized blocks retain their layout instead of being shrunk or clipped.
+  if (bottom - top > high - low)
+    return static_cast<int>(std::lround((static_cast<double>(low) + high - top - bottom) / 2.0));
+  return std::clamp(0, low - top, high - bottom);
+}
+
 } // namespace
 
 CLibassRenderResult::CLibassRenderResult(const ASS_Image* images,
-                                       const CLibassRenderResult* unchangedBitmaps)
+                                       const CLibassRenderResult* unchangedBitmaps,
+                                       int verticalOffset)
 {
   size_t count = 0;
   for (const ASS_Image* image = images; image; image = image->next)
@@ -76,6 +112,7 @@ CLibassRenderResult::CLibassRenderResult(const ASS_Image* images,
   {
     ASS_Image& image = m_images[i];
     image = *images;
+    image.dst_y += verticalOffset;
     image.next = i + 1 < count ? &m_images[i + 1] : nullptr;
     image.bitmap = nullptr;
     image.stride = image.w;
@@ -354,7 +391,8 @@ std::shared_ptr<const CLibassRenderResult> CDVDSubtitlesLibass::RenderImage(
   }
 
   const int64_t ptsMs = DVD_TIME_TO_MSEC(pts);
-  const bool styleChanged = updateStyle || m_currentDefaultStyleId == ASS_NO_ID;
+  const bool styleChanged = updateStyle || m_currentDefaultStyleId == ASS_NO_ID ||
+                            m_lastStyle != subStyle || !RenderOptsEqual(opts, m_lastOpts);
 
   // Fast path: if the render options are unchanged, the style was not
   // re-applied, and we are still inside a precomputed interval over which the
@@ -371,6 +409,7 @@ std::shared_ptr<const CLibassRenderResult> CDVDSubtitlesLibass::RenderImage(
   if (styleChanged)
   {
     ApplyStyle(subStyle, opts);
+    m_lastStyle = subStyle;
   }
 
   // Reversed par value
@@ -431,20 +470,25 @@ std::shared_ptr<const CLibassRenderResult> CDVDSubtitlesLibass::RenderImage(
   // this is a known side effect from libass devs and not a bug from our part
   int localChanges = 0;
   const ASS_Image* images = ass_render_frame(m_renderer, m_track, ptsMs, &localChanges);
+  const int imageYOffset = m_subtitleType == ADAPTED ?
+      ActiveAreaTextOffset(images, opts, *subStyle) : 0;
   if (!images)
     m_lastResult.reset();
-  else if (localChanges != 0 || !m_lastResult || opts.frameWidth != m_lastOpts.frameWidth ||
+  else if (localChanges != 0 || !m_lastResult || imageYOffset != m_lastImageYOffset ||
+           opts.frameWidth != m_lastOpts.frameWidth ||
            opts.frameHeight != m_lastOpts.frameHeight)
   {
     // Copy before unlocking: libass may replace both the list and its bitmaps
     // on the next render. Conversion also depends on the frame dimensions.
     // Position-only changes need new headers, but not another pixel copy.
     m_lastResult = std::make_shared<const CLibassRenderResult>(
-        images, localChanges == 0 || localChanges == 1 ? m_lastResult.get() : nullptr);
+        images, localChanges == 0 || localChanges == 1 ? m_lastResult.get() : nullptr,
+        imageYOffset);
   }
 
   // Unchanged output retains its identity, including across animated renders
   // that happen to rasterize identically. Each consumer validates that identity.
+  m_lastImageYOffset = imageYOffset;
   m_lastOpts = opts;
   UpdateRenderCache(ptsMs);
 
@@ -780,6 +824,15 @@ void CDVDSubtitlesLibass::ApplyStyle(const std::shared_ptr<const style>& subStyl
              subStyle->alignment == FontAlign::MIDDLE_RIGHT ||
              subStyle->alignment == FontAlign::SUB_RIGHT)
       style->Alignment |= HALIGN_RIGHT;
+  }
+
+  if (m_subtitleType == ADAPTED && style)
+  {
+    // Updating track fields alone retains collision positions for an existing
+    // cue. This supported setter reconfigures CE libass 0.17.4; overrides stay
+    // disabled, so the adapted track remains the source of its style.
+    ass_set_selective_style_override(m_renderer, style);
+    ass_set_selective_style_override_enabled(m_renderer, ASS_OVERRIDE_DEFAULT);
   }
 
   if (m_subtitleType == NATIVE)

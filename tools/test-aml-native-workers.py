@@ -55,6 +55,7 @@ std::atomic<int64_t> s_detectLastCacheCheckMs{0};
 @PUBLISH@
 std::function<void(const std::shared_ptr<DetectSource>&,const CAMLNativeWorker::Run&)> scanHook;
 void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source,const CAMLNativeWorker::Run& state){assert(scanHook);scanHook(source,state);}
+void aml_subtitle_active_area_invalidate(bool preserveGeometry = false);
 void aml_dv_detect_set_file(const std::string&);
 void select(const std::string& path,bool native=true,int w=1920,int h=1080){
   aml_dv_detect_set_file(path);assert(aml_subtitle_active_area_configure(w,h,native,true,aml_subtitle_active_area_source()));

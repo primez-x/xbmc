@@ -48,6 +48,8 @@ PREFIX = r'''
 #include <optional>
 #include <string>
 #include <vector>
+std::vector<bool> subtitleInvalidations;
+void aml_subtitle_active_area_invalidate(bool preserve) { subtitleInvalidations.push_back(preserve); }
 using namespace std::chrono_literals;
 using CCriticalSection = std::mutex;
 constexpr int LOGFATAL=0, LOGWARNING=1, LOGDEBUG=2, LOGERROR=3, LOGAUDIO=4, LOGVIDEO=5;
@@ -259,7 +261,7 @@ struct Parent {
   void CompleteFileReplacement() {++replacements;}
   @PENDING_FIELDS@
   struct { void Suspend() {} } m_vs10Action;
-  void FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete={});
+  void FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete={},bool preserveSubtitleGeometry=false);
   void CancelParentLifecycle(); bool ContinueParentLifecycle(); void SynchronizeStreams(bool);
   void HandleMessages() {
     std::shared_ptr<CDVDMsg> pMsg; int priority=0;
@@ -596,7 +598,22 @@ static void stale_and_clock_policy() {
   }
 }
 
-int main() { audio_seek_eof(); queues(); continuation(); multiple_flushes(); failed_lifecycle(); cancelled_session(); parent_wait(); nested_and_renderer(); stale_and_clock_policy(); }
+static void subtitle_geometry_intent() {
+  for(bool first:{false,true})for(bool second:{false,true}) {
+    subtitleInvalidations.clear();CVideoPlayerVideo video;Parent parent(video);
+    parent.FlushBuffers(1,false,false,{},first);
+    parent.FlushBuffers(2,true,true,{},second);
+    assert((subtitleInvalidations==std::vector<bool>{first,second}));
+    complete(video);assert(!parent.ContinueParentLifecycle());
+    assert((subtitleInvalidations==std::vector<bool>{first,second,second}));
+    complete(video);assert(parent.ContinueParentLifecycle());
+  }
+  subtitleInvalidations.clear();CVideoPlayerVideo video;Parent parent(video);
+  parent.FlushBuffers(1,false,false);
+  assert(subtitleInvalidations==std::vector<bool>{false});
+}
+
+int main() { subtitle_geometry_intent(); audio_seek_eof(); queues(); continuation(); multiple_flushes(); failed_lifecycle(); cancelled_session(); parent_wait(); nested_and_renderer(); stale_and_clock_policy(); }
 '''
 
 
@@ -613,6 +630,9 @@ def harness(root=ROOT):
     methods = '\n'.join(block(parent, signature).replace('CVideoPlayer::', 'Parent::') for signature in (
         'void CVideoPlayer::FlushBuffers(', 'void CVideoPlayer::CancelParentLifecycle(',
         'bool CVideoPlayer::ContinueParentLifecycle(', 'void CVideoPlayer::SynchronizeStreams('))
+    # Enable only the parent's Amlogic invalidation hook for the recording API.
+    # Native decoder internals retain their separate production-helper suites.
+    methods = methods.replace('#if defined(HAS_LIBAMCODEC)', '#if 1')
     close = block(video, 'void CVideoPlayerVideo::CloseStream(')
     retirement = close[close.index('  if (auto request ='):close.index('  m_pVideoCodec.reset();')]
     audio = (root / 'xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp').read_text()
@@ -664,6 +684,7 @@ def run(source, directory, label, expect_failure=False):
         raise AssertionError(result.stderr)
     else:
         print('PASS:', label)
+    return result
 
 
 def main():
@@ -677,6 +698,9 @@ def main():
         run(source, directory, 'player-lifecycle')
         if args.negative_controls:
             mutants = {
+                'subtitle-deferred-forces-retention': ('deferred.preserveSubtitleGeometry);', 'true);'),
+                'subtitle-deferred-discards-geometry': ('deferred.preserveSubtitleGeometry);', 'false);'),
+                'subtitle-default-retains-geometry': ('bool preserveSubtitleGeometry=false);', 'bool preserveSubtitleGeometry=true);'),
                 'audio-stale-eof': ('  m_messageQueue.Flush(CDVDMsg::GENERAL_EOF);', ''),
                 'audio-loses-epoch': ('std::make_shared<CDVDMsgStreamFlush>(sync, ++m_syncRequest)', 'std::make_shared<CDVDMsgBool>(CDVDMsg::GENERAL_FLUSH, sync)'),
                 'admit-replay-while-pending': ('if (lifecyclePending)', 'if (false && lifecyclePending)'),
@@ -695,7 +719,10 @@ def main():
             for label, (old, new) in mutants.items():
                 if old not in source:
                     raise AssertionError('negative control marker missing: ' + label)
-                run(source.replace(old, new, 1), directory, label, expect_failure=True)
+                result = run(source.replace(old, new, 1), directory, label, expect_failure=True)
+                if label.startswith('subtitle-'):
+                    assert result.returncode == -6 and 'Assertion' in result.stderr, result.stderr
+                    assert 'AddressSanitizer' not in result.stderr and 'runtime error:' not in result.stderr, result.stderr
 
 
 if __name__ == '__main__':

@@ -41,8 +41,8 @@ public:
   void Configure();
 
   // Retain one immutable style version and value options for this synchronous
-  // request. Callers must set updateStyle when replacing the effective style;
-  // pointer identity alone does not invalidate the ASS track or raster cache.
+  // request. Each handler observes immutable style identity and render options;
+  // updateStyle can additionally force reapplication.
   std::shared_ptr<const CLibassRenderResult> RenderImage(
       double pts,
       KODI::SUBTITLES::STYLE::renderOpts opts,
@@ -207,6 +207,8 @@ private:
   // collapsing playback to a few fps.
   std::shared_ptr<const CLibassRenderResult> m_lastResult;
   KODI::SUBTITLES::STYLE::renderOpts m_lastOpts{};
+  std::shared_ptr<const KODI::SUBTITLES::STYLE::style> m_lastStyle;
+  int m_lastImageYOffset{0};
   bool m_renderCacheValid{false};
   int64_t m_cacheValidFrom{0};
   int64_t m_cacheValidUntil{0};

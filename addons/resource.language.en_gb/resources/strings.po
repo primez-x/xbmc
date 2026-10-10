@@ -26307,7 +26307,7 @@ msgstr ""
 #. "Dolby Vision Display Led Restrict Overlays"
 #: system/settings/settings.xml
 msgctxt "#60191"
-msgid "Constrain bitmap subtitles horizontally and vertically and text subtitles vertically to the visible picture, refined by native Dolby Vision L5 or valid detected borders. Applies to SDR, HDR and Dolby Vision. Player-added bars need no detection. Oversized bitmap dialogue keeps its size and may extend beyond the picture. This setting does not enable scanning or change Dolby signaling."
+msgid "Constrain bitmap subtitles horizontally and vertically and adapted text subtitles vertically to the visible picture, refined by native Dolby Vision L5 or valid detected borders. Applies to SDR, HDR and Dolby Vision. Player-added bars need no detection. Authored ASS positions and forced margins are preserved. Oversized dialogue keeps its size and may extend beyond the picture. This setting does not enable scanning or change Dolby signaling."
 msgstr ""
 
 #. "Dolby Vision Display Led Restrict Overlays - User Position"

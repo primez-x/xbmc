@@ -28,7 +28,7 @@ def main():
     assert Path(args.font).is_file(), args.font
     source = (ROOT / 'xbmc/cores/VideoPlayer/DVDSubtitles/DVDSubtitlesLibass.cpp').read_text()
     code = PRELUDE
-    for signature in ['CLibassRenderResult::CLibassRenderResult(', 'bool RenderOptsEqual(',
+    for signature in ['CLibassRenderResult::CLibassRenderResult(', 'bool RenderOptsEqual(', 'int ActiveAreaTextOffset(',
                       'std::shared_ptr<const CLibassRenderResult> CDVDSubtitlesLibass::RenderImage(',
                       'bool CDVDSubtitlesLibass::IsDynamicEvent(',
                       'void CDVDSubtitlesLibass::UpdateRenderCache(',
@@ -53,6 +53,7 @@ PRELUDE = r'''
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -69,7 +70,7 @@ PRELUDE = r'''
 using namespace KODI::SUBTITLES::STYLE;
 using CCriticalSection=std::recursive_mutex;
 #define DVD_TIME_TO_MSEC(x) ((x)/1000)
-constexpr int LOGERROR=1,ASS_NO_ID=-1,NATIVE=0;
+constexpr int LOGERROR=1,ASS_NO_ID=-1,NATIVE=0,ADAPTED=1;
 struct CLog{template<typename... T>static void Log(T...){}};
 struct StringUtils{static void ToLower(std::string& text){
   for(char& c:text)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));}};
@@ -80,6 +81,7 @@ public:
   ASS_Library* m_library=nullptr;ASS_Renderer* m_renderer=nullptr;ASS_Track* m_track=nullptr;
   CCriticalSection m_section;int m_subtitleType=NATIVE,m_currentDefaultStyleId=0;
   std::shared_ptr<const CLibassRenderResult> m_lastResult;
+  std::shared_ptr<const style> m_lastStyle;int m_lastImageYOffset=0;
   renderOpts m_lastOpts{};bool m_renderCacheValid=false;
   int64_t m_cacheValidFrom=0,m_cacheValidUntil=0;
   ~CDVDSubtitlesLibass(){ass_free_track(m_track);ass_renderer_done(m_renderer);ass_library_done(m_library);}
@@ -187,15 +189,18 @@ int main(int argc,char** argv){
    auto heldStyle=subStyle;builder.fontSize=44;subStyle=std::make_shared<const style>(builder);
    assert(heldStyle!=subStyle&&heldStyle->fontSize==28);
    const int applied=h.styleApplications;
-   assert(h.RenderImage(500000,opts,false,subStyle)==beforeStyle&&h.styleApplications==applied);
+   auto automatic=h.RenderImage(500000,opts,false,subStyle);
+   assert(automatic!=beforeStyle&&h.styleApplications==applied+1);
+   assert(Inspect::Bytes(*automatic)!=Inspect::Bytes(*beforeStyle));
    // Replacing the caller handle during application must not change this request.
    h.onApply=[&]{subStyle=heldStyle;};
    auto styled=h.RenderImage(500000,opts,true,subStyle);
    h.onApply={};
-   assert(h.styleApplications==applied+1&&h.m_track->styles[0].FontSize==44);
+   assert(h.styleApplications==applied+2&&h.m_track->styles[0].FontSize==44);
    assert(styled!=beforeStyle&&Inspect::Bytes(*styled)!=Inspect::Bytes(*beforeStyle));
    // Fractional canvas change rounds to the same libass dimensions, but the
    // GPU conversion denominator changes: new identity, shared owned pixels.
+   subStyle=std::make_shared<const style>(builder);
    auto fractional=opts;fractional.frameWidth=640.25f;
    auto resized=h.RenderImage(500000,fractional,false,subStyle);
    assert(resized!=styled&&Inspect::Storage(*resized)==Inspect::Storage(*styled));

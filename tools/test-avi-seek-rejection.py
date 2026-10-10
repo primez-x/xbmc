@@ -200,7 +200,7 @@ struct CVideoPlayer{
  void RecallSubtitlesAfterSeek(double,double){++recalls;}
  void SetPlaySpeed(int s){++speedChanges;m_playSpeed=s;}
  // Downstream flush is a recording deferred adapter; its full lifecycle has its own suite.
- void FlushBuffers(double s,bool a,bool y,std::function<void()> done){++flushes;queued.clear();
+ void FlushBuffers(double s,bool a,bool y,std::function<void()> done,bool = false){++flushes;queued.clear();
    flushStart=s;flushAccurate=a;flushSync=y;complete=std::move(done);}
  void Complete(){assert(complete);auto done=std::move(complete);done();}
 };

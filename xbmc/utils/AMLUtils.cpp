@@ -2756,6 +2756,8 @@ struct DetectSource
   const std::shared_ptr<const void> selection;
   const std::shared_ptr<std::atomic<bool>> superseded{std::make_shared<std::atomic<bool>>(false)};
   std::shared_ptr<const DetectResult> result; // protected by s_detectSourceMutex
+  // Accepted file-wide geometry may outlive a cancelled probe, never its admission.
+  std::shared_ptr<const DetectResult> retained;
 };
 static std::mutex s_detectSourceMutex;
 static std::shared_ptr<DetectSource> s_detectSource = std::make_shared<DetectSource>("");
@@ -2773,17 +2775,28 @@ bool aml_subtitle_active_area_configure(int width, int height, bool nativeDV, bo
   std::lock_guard<std::mutex> lock(s_detectSourceMutex);
   if (!expectedSource || expectedSource != s_detectSource->selection)
     return false;
-  s_detectSource->superseded->store(true);
-  s_detectSource = std::make_shared<DetectSource>(s_detectSource->path, width, height,
+  const auto previous = s_detectSource;
+  previous->superseded->store(true);
+  s_detectSource = std::make_shared<DetectSource>(previous->path, width, height,
                                                  nativeDV, allowProbe, expectedSource);
+  if (allowProbe && previous->width == width && previous->height == height &&
+      previous->nativeDV == nativeDV && previous->allowProbe == allowProbe)
+    s_detectSource->retained = previous->retained;
   s_detectStable.store(false);
   return true;
 }
 
-void aml_subtitle_active_area_invalidate()
+void aml_subtitle_active_area_invalidate(bool preserveGeometry)
 {
   // No join, I/O or native admission on the seek/lifecycle request thread.
   std::lock_guard<std::mutex> lock(s_detectSourceMutex);
+  if (preserveGeometry)
+  {
+    if (!s_detectSource->superseded->load() && s_detectSource->result)
+      s_detectSource->retained = s_detectSource->result;
+  }
+  else
+    s_detectSource->retained.reset();
   s_detectSource->superseded->store(true);
   s_detectSource->result.reset();
   s_detectStable.store(false);
@@ -2804,10 +2817,14 @@ bool aml_subtitle_detect_active_area_get(int width, int height, uint16_t& top,
   const auto& source = s_detectSource;
   const bool enabled = source->nativeDV ? aml_dv_detect_active_area_enabled()
       : settings()->GetBool(CSettings::SETTING_SUBTITLES_DETECTACTIVEAREA);
-  if (!enabled || source->superseded->load() || !source->result ||
+  // Retention is only set by an explicit pure seek/reset and remains bound to
+  // this selection/dimension/native/probe identity, independent of worker state.
+  const auto accepted = !source->superseded->load() && source->result ?
+      source->result : source->retained;
+  if (!enabled || !source->allowProbe || !accepted ||
       source->width != width || source->height != height)
     return false;
-  const auto& result = *source->result;
+  const auto& result = *accepted;
   top = result.top; bottom = result.bottom; left = result.left; right = result.right;
   return true;
 }
@@ -3684,7 +3701,16 @@ void aml_dv_detect_active_area_start()
   }
   s_detectState.store(DV_DETECT_RUNNING);
   s_detectWorker.Start([source](const CAMLNativeWorker::Run& run) {
-    DetectActiveAreaFromFile(source, run);
+    std::shared_ptr<const DetectResult> retained;
+    {
+      std::lock_guard<std::mutex> lock(s_detectSourceMutex);
+      if (source == s_detectSource && !source->superseded->load())
+        retained = source->retained;
+    }
+    if (retained)
+      detect_publish(run, source, retained->top, retained->bottom, retained->left, retained->right);
+    else
+      DetectActiveAreaFromFile(source, run);
   }, source->superseded);
 }
 

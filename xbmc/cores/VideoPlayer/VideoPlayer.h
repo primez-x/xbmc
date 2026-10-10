@@ -472,7 +472,8 @@ protected:
   double GetQueueTime();
   CacheInfo GetCachingTimes();
 
-  void FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete = {});
+  void FlushBuffers(double pts, bool accurate, bool sync, std::function<void()> complete = {},
+                    bool preserveSubtitleGeometry = false);
   struct PendingFlush
   {
     std::shared_ptr<CVideoFlushRequest> video;
@@ -485,6 +486,7 @@ protected:
     bool accurate;
     bool sync;
     std::function<void()> complete;
+    bool preserveSubtitleGeometry;
   };
   std::optional<PendingFlush> m_pendingFlush;
   // A DVD navigation callback can flush inside the seek that will itself flush.
