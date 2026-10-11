@@ -31,16 +31,31 @@ def source(aml=None):
     code += 'bool AdmitFrame(Frame* frame,Source* source){\n' + admit + 'return true;cleanup:return false;}\n'
     code += 'uint32_t Contrast(Frame* frame){int lastWidth=frame->width,lastHeight=frame->height;{\n'
     code += access + '(void)sampleW;(void)sampleStartX;return contrast;}cleanup:return 0;}\n'
-    if 'static uint16_t detect_refine_edge(' in aml:
+    typed = 'struct DetectEdgeMeasurement' in aml
+    if typed:
+        code += aml[aml.index('enum class DetectEdgeReason'):aml.index('enum class DetectAxisConfidence')]
+        code += 'template<typename Luma>\n' + function(aml, 'static DetectEdgeMeasurement detect_refine_edge(') + '\n'
+        code += '#define TYPED_EDGE_EVIDENCE 1\nstd::vector<DetectEdgeMeasurement> edgeMeasurements;\n'
+    elif 'static uint16_t detect_refine_edge(' in aml:
         code += 'template<typename Luma>\n' + function(aml, 'static uint16_t detect_refine_edge(') + '\n'
     code += 'Result Edges(Frame* frame){int lastWidth=frame->width,lastHeight=frame->height;\n'
-    code += edges + 'return {sTop,sBottom,sLeft,sRight};}\n'
+    if typed:
+        code += '(void)detect_edge_reason;(void)detect_edge_lanes;\n'
+    code += edges
+    if typed:
+        code += 'edgeMeasurements.assign(std::begin(measurements),std::end(measurements));\n'
+    code += 'return {sTop,sBottom,sLeft,sRight' + (',rejectedSpatial' if typed else '') + '};}\n'
+    code += 'constexpr uint16_t Unobserved=' + ('UINT16_MAX' if typed else '0') + ';\n'
     code += re.search(r'enum class DetectAxisConfidence\s*\{.*?\};', aml, re.S).group() + '\n'
+    if typed:
+        code += function(aml, 'struct DetectPairEvidence') + ';\n'
+        code += function(aml, 'static DetectPairEvidence detect_pair_evidence(') + '\n'
     code += function(aml, 'static DetectAxisConfidence detect_axis_consensus(') + '\n'
     code += function(aml, 'static bool detect_samples_consensus(') + '\n'
     code += re.search(r'static const uint32_t s_commonAR\[\] = \{.*?\};', aml, re.S).group() + '\n'
     final = scan[scan.index('    /* Require enough usable samples'):scan.index('\n  }\n\n  detect_publish(')]
-    code += 'bool Select(const uint16_t* samples_top,const uint16_t* samples_bottom,const uint16_t* samples_left,const uint16_t* samples_right,int validSamples,int lastWidth,int lastHeight,DetectResult& result){\n'
+    code += 'bool Select(const uint16_t* samples_top,const uint16_t* samples_bottom,const uint16_t* samples_left,const uint16_t* samples_right,int validSamples,int lastWidth,int lastHeight,DetectResult& result,const bool* rejected=nullptr){\n'
+    code += 'bool known[7]{};const bool* samples_rejected=rejected?rejected:known;(void)samples_rejected;\n'
     code += 'constexpr int numSeeks=7;uint16_t detTop=0,detBottom=0,detLeft=0,detRight=0;{\n'
     code += final + '\n}result={detTop,detBottom,detLeft,detRight};return true;cleanup:return false;}\n'
     cache = (ROOT / 'xbmc/cores/DataCacheCore.cpp').read_text()
@@ -65,6 +80,7 @@ PREFIX = r'''
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <vector>
 #include "utils/AgedMap.h"
 using CCriticalSection=std::recursive_mutex;
@@ -78,7 +94,7 @@ std::atomic<int> s_detectState{0};
 struct Frame {int width=128,height=72,format=0;int linesize[1]{128};uint8_t* data[1]{};};
 struct Source {int width=128,height=72;};
 struct DetectResult {uint16_t top,bottom,left,right;};
-using Result=DetectResult;
+struct Result {uint16_t top,bottom,left,right;bool rejected{false};};
 struct DOVIFrameMetadata {double pts=0;bool has_level5_metadata=false;int top=0;};
 struct CDataCacheCore {
  CCriticalSection m_videoPlayerSection;
@@ -92,7 +108,7 @@ int main(){
  Source source;Frame frame;std::vector<uint8_t> image(128*72,16);frame.data[0]=image.data();
  for(int y=8;y<64;++y)for(int x=0;x<128;++x)image[y*128+x]=120;
  assert(AdmitFrame(&frame,&source));assert(Contrast(&frame)>10);
- auto edges=Edges(&frame);assert(edges.top==8&&edges.bottom==8&&edges.left==0&&edges.right==0);
+ auto edges=Edges(&frame);assert(edges.top==8&&edges.bottom==8&&edges.left==Unobserved&&edges.right==Unobserved);
  uint16_t top[7]={8,8,8,8,8,8,8},bottom[7]={8,8,8,8,8,8,8},left[7]={},right[7]={};
  DetectResult result{};
  assert(detect_samples_consensus(top,bottom,left,right,7,result)&&result.top==8&&result.bottom==8);
@@ -218,8 +234,8 @@ def main():
     if args.negative_controls:
         for label, old, new in [
             ('half accepted as majority', 'if (bestSupport < count / 2 + 1)', 'if (bestSupport < (count + 1) / 2)'),
-            ('smaller/full-frame accepted', 'if (first[i] + tolerance < candidate || second[i] + tolerance < candidate)', 'if (false && (first[i] + tolerance < candidate || second[i] + tolerance < candidate))'),
-            ('bilateral mixed aspect accepted', 'if (first[i] > candidate + tolerance && second[i] > candidate + tolerance)', 'if (false && first[i] > candidate + tolerance && second[i] > candidate + tolerance)'),
+            ('smaller/full-frame accepted', 'if ((first[i] != UINT16_MAX && first[i] + tolerance < candidate) ||\n          (second[i] != UINT16_MAX && second[i] + tolerance < candidate))', 'if (false && ((first[i] != UINT16_MAX && first[i] + tolerance < candidate) || (second[i] != UINT16_MAX && second[i] + tolerance < candidate)))'),
+            ('bilateral mixed aspect accepted', 'first[i] > candidate + tolerance && second[i] > candidate + tolerance)', 'false && first[i] > candidate + tolerance && second[i] > candidate + tolerance)'),
             ('joint evidence bypassed', 'std::abs(static_cast<int>(first[j]) - second[j]) <= tolerance &&\n          std::abs(static_cast<int>(first[j]) - value) <= tolerance &&\n          std::abs(static_cast<int>(second[j]) - value) <= tolerance)', 'std::abs(static_cast<int>(first[j]) - value) <= tolerance)'),
             ('unrelated horizontal noise vetoes picture', 'uint16_t vertical = 0, horizontal = 0;', 'if (*std::max_element(left,left+count)-*std::min_element(left,left+count)>5) return false; uint16_t vertical = 0, horizontal = 0;'),
             ('scanner discards consensus', 'detTop = consensus.top;', 'detTop = 0;'),

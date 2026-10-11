@@ -24,7 +24,7 @@ def generate(baseline=None):
     # Renderer/lifecycle code stays at the current version. Only the pixel
     # estimator changes in the original-versus-corrected comparison.
     connected = TEXT['generate']().replace('int main(int argc,char** argv)', 'void retainedMain(int argc,char** argv)', 1)
-    return connected + formats + frame + '\nusing Result=DetectResult;\nconstexpr int DV_DETECT_SKIP_IMAX=6;\n' + bodies + TESTS
+    return connected + formats + frame + '\nstruct Result {uint16_t top,bottom,left,right;bool rejected{false};};\nconstexpr int DV_DETECT_SKIP_IMAX=6;\n' + bodies + TESTS
 
 
 TESTS = r'''
@@ -44,9 +44,9 @@ struct PixelImage {
  Result edges(){assert(AdmitFrame(&frame,&source));assert(Contrast(&frame)>=10);return Edges(&frame);}
 };
 bool sampleSelect(const std::vector<Result>& edges,int width,int height,DetectResult& result){
- assert(edges.size()==7);uint16_t t[7],b[7],l[7],r[7];
- for(int i=0;i<7;++i){t[i]=edges[i].top;b[i]=edges[i].bottom;l[i]=edges[i].left;r[i]=edges[i].right;}
- return Select(t,b,l,r,7,width,height,result);
+ assert(edges.size()==7);uint16_t t[7],b[7],l[7],r[7];bool rejected[7];
+ for(int i=0;i<7;++i){t[i]=edges[i].top;b[i]=edges[i].bottom;l[i]=edges[i].left;r[i]=edges[i].right;rejected[i]=edges[i].rejected;}
+ return Select(t,b,l,r,7,width,height,result,rejected);
 }
 DetectResult pixels(){
  PixelImage image;std::vector<Result> scans;DetectResult result{};
@@ -64,59 +64,61 @@ DetectResult pixels(){
  const auto accepted=result;
  // Replacing one sample with actual wider/narrower/full-frame picture keeps
  // the original smaller-bound and bilateral inward framing vetoes effective.
- image.fill(0,0,0,0,80,90,0,0);scans[6]=image.edges();
- assert(scans[6].top==0&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ image.fill(0,0,0,0,80,90,0,0);
+ for(int x=928;x<992;++x){image.bytes[x]=120;image.bytes[1079*1920+x]=120;}
+ scans[6]=image.edges();
+ assert(scans[6].top==0&&scans[6].bottom==0&&!scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  image.fill(10,10,0,0);scans[6]=image.edges();assert(!sampleSelect(scans,1920,1080,result));
  image.fill(40,40,0,0);scans[6]=image.edges();assert(scans[6].top==40&&scans[6].bottom==40);assert(!sampleSelect(scans,1920,1080,result));
  // A small isolated caption in a bar outside the old centre strip is veto
  // evidence, not something to discard for failing the spatial quorum.
  image.fill(20,20,0,0);
  for(int x=0;x<64;++x)image.bytes[7*1920+x]=200;
- scans[6]=image.edges();assert(scans[6].top==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  image.fill(20,20,0,0);
  for(int y=7;y<20;++y)for(int x=928;x<992;++x)image.bytes[y*1920+x]=24;
- scans[6]=image.edges();assert(scans[6].top==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // A persistent isolated earlier departure still cannot be overruled by
  // the other strips' majority at20 or by a deep original centre estimate.
  image.fill(20,20,0,0);
  for(int y=7;y<20;++y)for(int x=0;x<64;++x)image.bytes[y*1920+x]=200;
- scans[6]=image.edges();assert(scans[6].top==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // Broad captions/graphics can meet the spatial quorum on both sides of
  // a genuinely larger bar. Their return to black must retain a framing veto.
  image.fill(40,40,0,0,90,90,40,40);
  for(int x=1200;x<1920;++x)image.bytes[1059*1920+x]=200;
- scans[6]=image.edges();assert(scans[6].top==40&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==40&&scans[6].bottom==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // Dim full-width stripes evade the old midpoint but include the centre
  // as well as distributed strips; return-to-black remains an independent gate.
  image.fill(40,40,0,0,90,90,40,40);
  for(int y=20;y<28;++y)for(int x=0;x<1920;++x){image.bytes[y*1920+x]=24;image.bytes[(1079-y)*1920+x]=24;}
- scans[6]=image.edges();assert(scans[6].top==0&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].bottom==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  image.fill(40,40,0,0,90,90,40,40);
  for(int x=0;x<760;++x)image.bytes[20*1920+x]=200;
  for(int x=1200;x<1920;++x)image.bytes[1059*1920+x]=200;
- scans[6]=image.edges();assert(scans[6].top==0&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].bottom==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // A broad graphic may persist all the way to the actual image boundary.
  // It must not turn a genuine larger pair into a tolerated unilateral outlier.
  image.fill(40,40,0,0,90,90,40,40);
  for(int y=20;y<40;++y)for(int x=1200;x<1920;++x)image.bytes[(1079-y)*1920+x]=200;
- scans[6]=image.edges();assert(scans[6].top==40&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==40&&scans[6].bottom==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // The same safety decision covers thicker graphics and compressed stripes.
  image.fill(40,40,0,0,90,90,40,40);
  for(int y=20;y<28;++y){
   for(int x=0;x<760;++x)image.bytes[y*1920+x]=200;
   for(int x=1200;x<1920;++x)image.bytes[(1079-y)*1920+x]=200;
  }
- scans[6]=image.edges();assert(scans[6].top==0&&scans[6].bottom==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==Unobserved&&scans[6].bottom==Unobserved&&scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  // A bright outer strip is direct full-frame evidence; a dark/low-contrast
  // frame does not acquire usable evidence through the refinement.
  image.fill(20,20,0,0);for(int x=0;x<64;++x)image.bytes[x]=100;
- scans[6]=image.edges();assert(scans[6].top==0);assert(!sampleSelect(scans,1920,1080,result));
+ scans[6]=image.edges();assert(scans[6].top==0&&!scans[6].rejected);assert(!sampleSelect(scans,1920,1080,result));
  std::fill(image.bytes.begin(),image.bytes.end(),16);assert(Contrast(&image.frame)<10);
  std::fill(image.bytes.begin(),image.bytes.end(),20);assert(Contrast(&image.frame)<10);
  // Uncorroborated earlier noise must not be counted as several agreeing
  // original bounds: unavailable lanes are not observations.
  image.fill(20,20,0,0,20,66,23,23);for(int x=0;x<64;++x)image.bytes[20*1920+x]=100;
- auto unsupported=image.edges();assert(unsupported.top==0);
+ auto unsupported=image.edges();assert(unsupported.top==Unobserved&&unsupported.rejected);
  // Uniform genuinely thin bars retain the same measurement and common-AR snap.
  image.fill(20,20,0,0,90,90,20,20);auto clean=image.edges();assert(clean.top==20&&clean.bottom==20);
  // Unchanged wider HEVC geometry, including both supported10-bit layouts.
@@ -132,7 +134,7 @@ DetectResult pixels(){
  // Transposed dark/nonuniform content exercises both independent pillar edges.
  PixelImage pillar;pillar.fill(0,0,240,240,28,100,0,0);
  for(int y=508;y<572;++y)for(int x=240;x<1680;++x)pillar.bytes[y*1920+x]=(x<500||x>=1400)?24:100;
- edge=pillar.edges();assert(edge.left==240&&edge.right==240&&edge.top==0&&edge.bottom==0);
+ edge=pillar.edges();assert(edge.left==240&&edge.right==240&&edge.top==Unobserved&&edge.bottom==Unobserved);
  std::vector<Result> side(7,edge);assert(sampleSelect(side,1920,1080,result)&&result.left==240&&result.right==240);
  pillar.fill(0,0,300,300,28,100,0,0);for(int y=508;y<572;++y)for(int x=300;x<1620;++x)pillar.bytes[y*1920+x]=(x<500||x>=1400)?24:100;
  side[6]=pillar.edges();assert(!sampleSelect(side,1920,1080,result));
@@ -142,9 +144,66 @@ DetectResult pixels(){
  std::cout<<"PASS: controlled1920 thin/noisy bars, dark shoulders, spatial captions, mixed/full frame, pillarbox and3840 10-bit edges through production consensus/snap\n";
  return accepted;
 }
+void darkEvidence(){
+ PixelImage image;
+ image.fill(20,20,0,0,28,66,123,223);
+ // Textured/vignetted active picture, dark centre shoulders and a near-black
+ // object that crosses a distributed strip inside the genuine image area.
+ for(int y=20;y<1060;++y)for(int x=0;x<1920;++x)
+  if(x<928||x>=992)image.bytes[y*1920+x]=static_cast<uint8_t>(24+(x/11+y/7)%45);
+ for(int y=35;y<72;++y)for(int x=0;x<180;++x)image.bytes[y*1920+x]=static_cast<uint8_t>(16+(x+y)%3);
+ auto dark=image.edges();assert(dark.rejected&&dark.top==Unobserved);
+#ifdef TYPED_EDGE_EVIDENCE
+ assert(edgeMeasurements[0].original==123&&edgeMeasurements[0].reason==DetectEdgeReason::RETURN_TO_BLACK);
+ assert(edgeMeasurements[0].lane==0&&edgeMeasurements[0].depth==35&&edgeMeasurements[0].departures[0]==20);
+ assert(edgeMeasurements[0].returnLevel<=22&&edgeMeasurements[0].borders[0]==16);
+ assert(detect_edge_lanes(edgeMeasurements[0]).find("16:20")!=std::string::npos);
+ assert(std::string(detect_edge_reason(edgeMeasurements[0].reason))=="return-to-black");
+ std::vector<Result> uncertain(7,dark);DetectResult result{};assert(!sampleSelect(uncertain,1920,1080,result));
+ // Rejected horizontal spatial evidence also remains a veto; silently dropping
+ // such positions could conceal actual captions/mixed framing.
+ bool rejected[7]={false,false,false,false,false,false,true};
+ uint16_t clean[]={20,20,20,20,20,20,20},zero[7]={};assert(!Select(clean,clean,zero,zero,7,1920,1080,result,rejected));
+ // The same textured dark scene can yield reliable pairs when its local edge
+ // evidence is adequate. Deep dark objects past the measured prefix do not
+ // invalidate a boundary; the guard is bounded by the original estimate.
+ image.fill(20,20,0,0,28,66,20,20);
+ for(int y=20;y<1060;++y)for(int x=0;x<1920;++x)
+  if(x<928||x>=992)image.bytes[y*1920+x]=static_cast<uint8_t>(24+(x/11+y/7)%45);
+ for(int y=250;y<400;++y)for(int x=0;x<700;++x)image.bytes[y*1920+x]=16;
+ auto reliable=image.edges();assert(!reliable.rejected&&reliable.top==20&&reliable.bottom==20);
+ std::vector<Result> supported(7,reliable);assert(sampleSelect(supported,1920,1080,result)&&result.top==21&&result.bottom==21);
+ // Unknowns do not manufacture independent or paired votes. Preserve original
+ // seven-position denominator and known framing vetoes before abstaining.
+ uint16_t t[]={20,20,20,UINT16_MAX,UINT16_MAX,20,UINT16_MAX};
+ uint16_t b[]={20,20,20,UINT16_MAX,20,UINT16_MAX,20};
+ auto evidence=detect_pair_evidence(t,b,7);assert(evidence.candidate==20&&evidence.first==4&&evidence.second==5&&evidence.paired==3);
+ assert(evidence.unknownFirst==3&&evidence.unknownSecond==2&&evidence.zeroFirst==0&&evidence.zeroSecond==0);
+ uint16_t border=0;assert(detect_axis_consensus(t,b,7,border)==DetectAxisConfidence::UNCERTAIN&&border==0);
+ t[3]=b[3]=0;evidence=detect_pair_evidence(t,b,7);assert(evidence.paired==3&&evidence.zeroFirst==1&&evidence.zeroSecond==1);
+ uint16_t known[]={20,20,20,20,20,0,UINT16_MAX},side[]={240,240,240,240,240,240,240};
+ assert(!Select(known,known,side,side,7,1920,1080,result));known[5]=40;assert(!Select(known,known,side,side,7,1920,1080,result));
+ known[5]=0;uint16_t partial[]={20,20,20,20,20,UINT16_MAX,UINT16_MAX};
+ assert(!Select(known,partial,side,side,7,1920,1080,result));
+ assert(!Select(partial,known,side,side,7,1920,1080,result));
+ known[5]=20;assert(detect_axis_consensus(known,known,7,border)==DetectAxisConfidence::UNCERTAIN);
+ // An entirely unobserved/unused orthogonal axis does not prohibit reliable
+ // letterbox geometry, nor does it contribute synthetic full-frame votes.
+ uint16_t unknown[]={UINT16_MAX,UINT16_MAX,UINT16_MAX,UINT16_MAX,UINT16_MAX,UINT16_MAX,UINT16_MAX};
+ assert(Select(clean,clean,unknown,unknown,7,1920,1080,result)&&result.top==21&&result.left==0);
+ auto luma=[](int,int)->uint32_t{return 16;};
+ auto absent=detect_refine_edge(luma,1920,1080,true,false,0,false);
+ auto unused=detect_refine_edge(luma,1920,1080,false,false,0,false,false);
+ auto measured=detect_refine_edge(luma,1920,1080,true,false,0,true);
+ assert(absent.value==UINT16_MAX&&absent.reason==DetectEdgeReason::NO_TRANSITION&&!absent.RejectedSpatialEvidence());
+ assert(unused.value==UINT16_MAX&&unused.reason==DetectEdgeReason::AXIS_UNUSED&&!unused.RejectedSpatialEvidence());
+ assert(measured.value==0&&measured.reason==DetectEdgeReason::ORIGINAL&&!measured.RejectedSpatialEvidence());
+#endif
+ std::cout<<"PASS: realistic dark picture may trigger return-to-black; uncertainty is separate from measured0, remains in coverage, cannot manufacture paired support or hide known framing vetoes\n";
+}
 int main(int argc,char** argv){
  assert(argc==2&&ass_library_version()==LIBASS_VERSION&&LIBASS_VERSION>=0x01704000);
- auto result=pixels();ready();select(false,1920,1080);int before=writes.load();
+ darkEvidence();auto result=pixels();ready();select(false,1920,1080);int before=writes.load();
  CRenderManager manager;manager.m_picture.iWidth=1920;manager.m_picture.iHeight=1080;manager.m_overlays.m_rs={0,0,1920,1080};
  auto c=cue(argv[1],"Tijd om te vertrekken.\\N- Hoezo? gypq");auto st=makeStyle();
  auto initial=draw(manager,c,st,true,true);assert(!s_detectSource->result);
@@ -172,17 +231,19 @@ def main():
     code = generate(revision)
     result = TEXT['run'](code, args, negative=bool(revision))
     if revision:
-        assert 'sampleSelect(scans,1920,1080,result)' in result.stderr, result.stderr
-        print('REJECTED original pixel estimator after strict compilation:', revision)
+        assert 'dark.rejected&&dark.top==Unobserved' in result.stderr, result.stderr
+        print('REJECTED original zero/uncertainty conflation after strict compilation:', revision)
     elif args.negative_controls:
         for label, old, new in [
-            ('centre-only edges', '  if (original == 0)', '  return original;\n  if (original == 0)'),
-            ('bright centre still sets threshold', 'average(depth) > border + 6', 'average(depth) > 50'),
-            ('earlier isolated content ignored', 'return support >= 3 ? earliest : 0;', 'return support >= 3 ? earliest : original;'),
-            ('unobserved lanes counted', 'edges[lane] = UINT16_MAX;', 'edges[lane] = original;'),
-            ('broad transient intrusion treated as picture', 'else if (edges[lane] != UINT16_MAX)', 'else if (false && edges[lane] != UINT16_MAX)'),
-            ('sustained side graphic treated as picture', 'if (edges[lanes / 2] > earliest + tolerance)', 'if (false && edges[lanes / 2] > earliest + tolerance)'),
-            ('bilateral mixed aspect veto removed', 'if (first[i] > candidate + tolerance && second[i] > candidate + tolerance)', 'if (false && first[i] > candidate + tolerance && second[i] > candidate + tolerance)'),
+            ('centre-only edges', '  if (original == 0)', '  return result;\n  if (original == 0)'),
+            ('bright centre still sets threshold', 'level > border + 6', 'level > 50'),
+            ('earlier isolated content ignored', 'result.value = support >= 3 ? earliest : UINT16_MAX;\n  result.reason = support >= 3 ? DetectEdgeReason::REFINED : DetectEdgeReason::STRIPS_UNSUPPORTED;', 'result.value = support >= 3 ? earliest : original;\n  result.reason = support >= 3 ? DetectEdgeReason::REFINED : DetectEdgeReason::ORIGINAL;'),
+            ('unobserved lanes counted', 'std::fill_n(departures, 9, UINT16_MAX);', 'std::fill_n(departures, 9, edge);'),
+            ('broad transient intrusion treated as picture', 'else if (result.departures[lane] != UINT16_MAX)', 'else if (false && result.departures[lane] != UINT16_MAX)'),
+            ('sustained side graphic treated as picture', 'if (result.departures[lanes / 2] > earliest + tolerance)', 'if (false && result.departures[lanes / 2] > earliest + tolerance)'),
+            ('bilateral mixed aspect veto removed', 'first[i] > candidate + tolerance && second[i] > candidate + tolerance)', 'false && first[i] > candidate + tolerance && second[i] > candidate + tolerance)'),
+            ('unknown masks known framing veto', 'int bestSupport = 0;', 'if (unknown) return DetectAxisConfidence::UNCERTAIN; int bestSupport = 0;'),
+            ('rejected positions silently used', '[](bool rejected) { return rejected; }', '[](bool rejected) { (void)rejected; return false; }'),
         ]:
             assert old in code, label
             TEXT['run'](code.replace(old, new, 1), args, negative=True)

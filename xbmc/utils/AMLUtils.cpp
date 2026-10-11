@@ -2995,6 +2995,76 @@ static void detect_publish(const CAMLNativeWorker::Run& run,
   s_detectInjected.store(true);
 }
 
+enum class DetectEdgeReason
+{
+  ORIGINAL,
+  REFINED,
+  BRIGHT_OUTER,
+  NO_TRANSITION,
+  AXIS_UNUSED,
+  RETURN_TO_BLACK,
+  CENTRE_UNSUPPORTED,
+  STRIPS_UNSUPPORTED
+};
+
+struct DetectEdgeMeasurement
+{
+  uint16_t original{0};
+  uint16_t value{UINT16_MAX}; // unknown, never a full-frame zero or a consensus vote
+  DetectEdgeReason reason{DetectEdgeReason::ORIGINAL};
+  int lane{-1};
+  int depth{-1};
+  int support{-1}; // not evaluated until all strips have been inspected
+  uint16_t earliest{UINT16_MAX};
+  uint16_t returnLevel{UINT16_MAX};
+  uint16_t borders[9];
+  uint16_t departures[9];
+
+  explicit DetectEdgeMeasurement(uint16_t edge) : original(edge)
+  {
+    std::fill_n(borders, 9, UINT16_MAX);
+    std::fill_n(departures, 9, UINT16_MAX);
+  }
+
+  bool RejectedSpatialEvidence() const
+  {
+    return reason == DetectEdgeReason::RETURN_TO_BLACK ||
+           reason == DetectEdgeReason::CENTRE_UNSUPPORTED ||
+           reason == DetectEdgeReason::STRIPS_UNSUPPORTED;
+  }
+};
+
+static const char* detect_edge_reason(DetectEdgeReason reason)
+{
+  switch (reason)
+  {
+    case DetectEdgeReason::ORIGINAL: return "original";
+    case DetectEdgeReason::REFINED: return "refined";
+    case DetectEdgeReason::BRIGHT_OUTER: return "bright-outer";
+    case DetectEdgeReason::NO_TRANSITION: return "no-transition";
+    case DetectEdgeReason::AXIS_UNUSED: return "axis-unused";
+    case DetectEdgeReason::RETURN_TO_BLACK: return "return-to-black";
+    case DetectEdgeReason::CENTRE_UNSUPPORTED: return "centre-unsupported";
+    case DetectEdgeReason::STRIPS_UNSUPPORTED: return "strips-unsupported";
+  }
+  return "unknown";
+}
+
+static std::string detect_edge_lanes(const DetectEdgeMeasurement& edge)
+{
+  std::string text;
+  for (int lane = 0; lane < 9; ++lane)
+  {
+    if (lane)
+      text += ',';
+    auto value = [](uint16_t number) {
+      return number == UINT16_MAX ? std::string("?") : std::to_string(number);
+    };
+    text += value(edge.borders[lane]) + ':' + value(edge.departures[lane]);
+  }
+  return text;
+}
+
 enum class DetectAxisConfidence
 {
   UNCERTAIN,
@@ -3002,22 +3072,82 @@ enum class DetectAxisConfidence
   VARIABLE
 };
 
+struct DetectPairEvidence
+{
+  uint16_t candidate{0};
+  int first{0}, second{0}, paired{0};
+  int unknownFirst{0}, unknownSecond{0}, zeroFirst{0}, zeroSecond{0};
+};
+
+// Diagnostic hypotheses only. Independent endpoint support never substitutes
+// for paired observations in the confidence decision.
+static DetectPairEvidence detect_pair_evidence(const uint16_t* first, const uint16_t* second,
+                                               int count)
+{
+  DetectPairEvidence best;
+  for (int i = 0; i < count; ++i)
+  {
+    best.unknownFirst += first[i] == UINT16_MAX;
+    best.unknownSecond += second[i] == UINT16_MAX;
+    best.zeroFirst += first[i] == 0;
+    best.zeroSecond += second[i] == 0;
+  }
+  for (int i = 0; i < count; ++i)
+  {
+    const uint16_t candidates[] = {first[i], second[i]};
+    for (const auto candidate : candidates)
+    {
+      if (candidate <= 5 || candidate == UINT16_MAX)
+        continue;
+      int f = 0, s = 0, paired = 0;
+      for (int j = 0; j < count; ++j)
+      {
+        const bool fm = first[j] != UINT16_MAX && std::abs(static_cast<int>(first[j]) - candidate) <= 5;
+        const bool sm = second[j] != UINT16_MAX && std::abs(static_cast<int>(second[j]) - candidate) <= 5;
+        f += fm;
+        s += sm;
+        paired += fm && sm && std::abs(static_cast<int>(first[j]) - second[j]) <= 5;
+      }
+      if (paired > best.paired || (paired == best.paired && f + s > best.first + best.second))
+      {
+        best.candidate = candidate;
+        best.first = f;
+        best.second = s;
+        best.paired = paired;
+      }
+    }
+  }
+  return best;
+}
+
 // A bright centre can put the midpoint threshold well above dark image content
 // at an encoded bar's real edge. Refine that estimate using distributed strips
 // and a bounded departure from near-black. This can only reduce an edge: the
 // original full-frame/smaller-bound evidence must never be hidden.
 template<typename Luma>
-static uint16_t detect_refine_edge(const Luma& getY, int width, int height,
-                                   bool vertical, bool reverse, uint16_t original)
+static DetectEdgeMeasurement detect_refine_edge(const Luma& getY, int width, int height,
+                                                bool vertical, bool reverse, uint16_t original,
+                                                bool found, bool enabled = true)
 {
+  DetectEdgeMeasurement result(original);
+  if (!enabled)
+  {
+    result.reason = DetectEdgeReason::AXIS_UNUSED;
+    return result;
+  }
+  if (!found)
+  {
+    result.reason = DetectEdgeReason::NO_TRANSITION;
+    return result;
+  }
+  result.value = original;
   if (original == 0)
-    return original;
+    return result;
   constexpr int lanes = 9;
   constexpr int tolerance = 5;
   const int length = vertical ? height : width;
   const int cross = vertical ? width : height;
   const int strip = std::min(64, cross / 2);
-  uint16_t edges[lanes];
   uint16_t earliest = original;
   for (int lane = 0; lane < lanes; ++lane)
   {
@@ -3030,44 +3160,66 @@ static uint16_t detect_refine_edge(const Luma& getY, int width, int height,
       return sum / strip;
     };
     const uint32_t border = average(0);
-    edges[lane] = UINT16_MAX;
+    result.borders[lane] = static_cast<uint16_t>(border);
     // A bright outer strip is direct full-frame/bar-intrusion evidence.
     if (border > 24)
-      return 0;
+    {
+      result.value = 0;
+      result.reason = DetectEdgeReason::BRIGHT_OUTER;
+      result.lane = lane;
+      result.depth = 0;
+      return result;
+    }
     for (int depth = 1; depth < original; ++depth)
     {
       // Six 8-bit luma codes tolerate compressed black without making the
       // threshold depend on an unrelated bright object at the frame centre.
-      if (average(depth) > border + 6)
+      const uint32_t level = average(depth);
+      if (level > border + 6)
       {
-        if (edges[lane] == UINT16_MAX)
+        if (result.departures[lane] == UINT16_MAX)
         {
-          edges[lane] = static_cast<uint16_t>(depth);
-          earliest = std::min(earliest, edges[lane]);
+          result.departures[lane] = static_cast<uint16_t>(depth);
+          earliest = std::min(earliest, result.departures[lane]);
+          result.earliest = earliest;
         }
       }
       // A caption or compression stripe can span several strips. Returning
       // to near-black before the original edge contradicts a sustained image
       // boundary; fail closed instead of hiding genuine larger framing.
-      else if (edges[lane] != UINT16_MAX)
-        return 0;
+      else if (result.departures[lane] != UINT16_MAX)
+      {
+        result.value = UINT16_MAX;
+        result.reason = DetectEdgeReason::RETURN_TO_BLACK;
+        result.lane = lane;
+        result.depth = depth;
+        result.returnLevel = static_cast<uint16_t>(level);
+        return result;
+      }
     }
   }
   if (earliest == original)
-    return original;
+    return result;
   int support = 0;
-  for (const auto edge : edges)
+  for (const auto edge : result.departures)
     if (edge <= earliest + tolerance)
       ++support;
   // Require the centre strip to corroborate the distributed departure too:
   // side graphics touching the picture can persist through a genuinely wider
   // bar without a return to black. Unsupported earlier content is veto evidence.
-  if (edges[lanes / 2] > earliest + tolerance)
-    return 0;
+  result.support = support;
+  if (result.departures[lanes / 2] > earliest + tolerance)
+  {
+    result.value = UINT16_MAX;
+    result.reason = DetectEdgeReason::CENTRE_UNSUPPORTED;
+    return result;
+  }
   // Distributed agreement supports a shallower boundary. A lone smaller
   // departure could be a caption/object in a bar: leave no positive crop on
   // this edge rather than allowing the centre estimate to erase that evidence.
-  return support >= 3 ? earliest : 0;
+  result.value = support >= 3 ? earliest : UINT16_MAX;
+  result.reason = support >= 3 ? DetectEdgeReason::REFINED : DetectEdgeReason::STRIPS_UNSUPPORTED;
+  return result;
 }
 
 static DetectAxisConfidence detect_axis_consensus(const uint16_t* first,
@@ -3076,17 +3228,26 @@ static DetectAxisConfidence detect_axis_consensus(const uint16_t* first,
 {
   constexpr int tolerance = 5; // coded pixels
   border = 0;
+  // Unknowns neither vote nor erase a known framing contradiction. Keep every
+  // seek position in the denominator; check known vetoes before abstaining.
+  bool unknown = false;
+  for (int i = 0; i < count; ++i)
+    if (first[i] == UINT16_MAX || second[i] == UINT16_MAX)
+      unknown = true;
   int bestSupport = 0;
   uint16_t candidate = 0;
   for (int i = 0; i < count; ++i)
   {
+    if (first[i] == UINT16_MAX || second[i] == UINT16_MAX)
+      continue;
     if (std::abs(static_cast<int>(first[i]) - second[i]) > tolerance)
       continue;
     const uint16_t value = std::min(first[i], second[i]);
     int support = 0;
     for (int j = 0; j < count; ++j)
     {
-      if (std::abs(static_cast<int>(first[j]) - second[j]) <= tolerance &&
+      if (first[j] != UINT16_MAX && second[j] != UINT16_MAX &&
+          std::abs(static_cast<int>(first[j]) - second[j]) <= tolerance &&
           std::abs(static_cast<int>(first[j]) - value) <= tolerance &&
           std::abs(static_cast<int>(second[j]) - value) <= tolerance)
         ++support;
@@ -3107,16 +3268,19 @@ static DetectAxisConfidence detect_axis_consensus(const uint16_t* first,
     {
       // Smaller bounds include full-frame scenes, nonzero aspect changes and
       // content/captions intruding into a bar. A majority cannot overrule them.
-      if (first[i] + tolerance < candidate || second[i] + tolerance < candidate)
+      if ((first[i] != UINT16_MAX && first[i] + tolerance < candidate) ||
+          (second[i] != UINT16_MAX && second[i] + tolerance < candidate))
         return DetectAxisConfidence::VARIABLE;
       // Both edges moving inward may be genuine narrower/asymmetric framing.
       // Only unilateral larger estimates are tolerated as dark-scene outliers.
-      if (first[i] > candidate + tolerance && second[i] > candidate + tolerance)
+      if (first[i] != UINT16_MAX && second[i] != UINT16_MAX &&
+          first[i] > candidate + tolerance && second[i] > candidate + tolerance)
         return DetectAxisConfidence::VARIABLE;
     }
-    border = candidate;
+    if (!unknown)
+      border = candidate;
   }
-  return DetectAxisConfidence::STABLE;
+  return unknown ? DetectAxisConfidence::UNCERTAIN : DetectAxisConfidence::STABLE;
 }
 
 static bool detect_samples_consensus(const uint16_t* top, const uint16_t* bottom,
@@ -3318,6 +3482,7 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
     const uint32_t minContrast = 10; /* minimum border-vs-content difference for detection */
     uint16_t samples_top[7] = {}, samples_bottom[7] = {};
     uint16_t samples_left[7] = {}, samples_right[7] = {};
+    bool samples_rejected[7] = {};
     int validSamples = 0;
     int lastWidth = 0, lastHeight = 0;
     /* Stale-frame detection: catches broken-seek cases (format-specific
@@ -3342,6 +3507,7 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
         break; /* cancelled */
 
       bool usable = false;
+      int measuredSeekPct = seekPercents[s];
 
       for (int retry = 0; retry <= maxRetries && !usable; retry++)
       {
@@ -3474,6 +3640,7 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
           continue;
         }
         usable = true;
+        measuredSeekPct = seekPct;
       }
 
       if (staleAbort)
@@ -3511,18 +3678,19 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
       uint32_t scanThreshold = (borderAvg + contentAvg) / 2;
 
       uint16_t sTop = 0, sBottom = 0, sLeft = 0, sRight = 0;
+      bool foundTop = false, foundBottom = false, foundLeft = false, foundRight = false;
 
       for (int row = 0; row < lastHeight / 2; row++)
       {
         uint32_t sum = 0;
         for (int i = 0; i < sampleW; i++) sum += getY(row, sampleStartX + i);
-        if (sum / sampleW > scanThreshold) { sTop = static_cast<uint16_t>(row); break; }
+        if (sum / sampleW > scanThreshold) { sTop = static_cast<uint16_t>(row); foundTop = true; break; }
       }
       for (int row = lastHeight - 1; row >= lastHeight / 2; row--)
       {
         uint32_t sum = 0;
         for (int i = 0; i < sampleW; i++) sum += getY(row, sampleStartX + i);
-        if (sum / sampleW > scanThreshold) { sBottom = static_cast<uint16_t>(lastHeight - 1 - row); break; }
+        if (sum / sampleW > scanThreshold) { sBottom = static_cast<uint16_t>(lastHeight - 1 - row); foundBottom = true; break; }
       }
       /* Skip L/R scan when frame is already wider than 16:9 — pillarbox
        * is impossible on a 16:9 display, and dark edges cause false positives. */
@@ -3547,29 +3715,60 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
         {
           uint32_t sum = 0;
           for (int i = 0; i < sampleH; i++) sum += getY(sampleStartY + i, col);
-          if (sum / sampleH > lrThreshold) { sLeft = static_cast<uint16_t>(col); break; }
+          if (sum / sampleH > lrThreshold) { sLeft = static_cast<uint16_t>(col); foundLeft = true; break; }
         }
         for (int col = lastWidth - 1; col >= lastWidth / 2; col--)
         {
           uint32_t sum = 0;
           for (int i = 0; i < sampleH; i++) sum += getY(sampleStartY + i, col);
-          if (sum / sampleH > lrThreshold) { sRight = static_cast<uint16_t>(lastWidth - 1 - col); break; }
+          if (sum / sampleH > lrThreshold) { sRight = static_cast<uint16_t>(lastWidth - 1 - col); foundRight = true; break; }
         }
       }
 
-      sTop = detect_refine_edge(getY, lastWidth, lastHeight, true, false, sTop);
-      sBottom = detect_refine_edge(getY, lastWidth, lastHeight, true, true, sBottom);
-      sLeft = detect_refine_edge(getY, lastWidth, lastHeight, false, false, sLeft);
-      sRight = detect_refine_edge(getY, lastWidth, lastHeight, false, true, sRight);
+      const bool horizontalEnabled = lastWidth * 1000 / lastHeight < 1778;
+      const DetectEdgeMeasurement measurements[] = {
+          detect_refine_edge(getY, lastWidth, lastHeight, true, false, sTop, foundTop),
+          detect_refine_edge(getY, lastWidth, lastHeight, true, true, sBottom, foundBottom),
+          detect_refine_edge(getY, lastWidth, lastHeight, false, false, sLeft, foundLeft, horizontalEnabled),
+          detect_refine_edge(getY, lastWidth, lastHeight, false, true, sRight, foundRight, horizontalEnabled)};
+      sTop = measurements[0].value;
+      sBottom = measurements[1].value;
+      sLeft = measurements[2].value;
+      sRight = measurements[3].value;
+      const bool rejectedSpatial = std::any_of(std::begin(measurements), std::end(measurements),
+          [](const auto& edge) { return edge.RejectedSpatialEvidence(); });
 
       samples_top[validSamples] = sTop;
       samples_bottom[validSamples] = sBottom;
       samples_left[validSamples] = sLeft;
       samples_right[validSamples] = sRight;
+      samples_rejected[validSamples] = rejectedSpatial;
+      // Bounded to four records per admitted seek position (at most 28/run),
+      // no extra frames/I/O or media URL. '?' means unvisited/no departure.
+      const char* names[] = {"T", "B", "L", "R"};
+      for (int edge = 0; edge < 4; ++edge)
+      {
+        const auto& measurement = measurements[edge];
+        CLog::Log(LOGINFO, "DetectActiveArea: evidence sample={} seek={}% pts={} tb={}/{} "
+                  "edge={} original={} result={} reason={} lane={} depth={} support={} earliest={} return-luma={} "
+                  "lanes(border:first)=[{}]",
+                  validSamples + 1, measuredSeekPct, frame->best_effort_timestamp,
+                  fmtCtx->streams[videoIdx]->time_base.num, fmtCtx->streams[videoIdx]->time_base.den,
+                  names[edge], measurement.original,
+                  measurement.value == UINT16_MAX ? -1 : static_cast<int>(measurement.value),
+                  detect_edge_reason(measurement.reason), measurement.lane, measurement.depth,
+                  measurement.support,
+                  measurement.earliest == UINT16_MAX ? -1 : static_cast<int>(measurement.earliest),
+                  measurement.returnLevel == UINT16_MAX ? -1 : static_cast<int>(measurement.returnLevel),
+                  detect_edge_lanes(measurement));
+      }
       validSamples++;
 
       CLog::Log(LOGDEBUG, "DetectActiveArea: sample {}: T={} B={} L={} R={}",
-                validSamples, sTop, sBottom, sLeft, sRight);
+                validSamples, sTop == UINT16_MAX ? -1 : static_cast<int>(sTop),
+                sBottom == UINT16_MAX ? -1 : static_cast<int>(sBottom),
+                sLeft == UINT16_MAX ? -1 : static_cast<int>(sLeft),
+                sRight == UINT16_MAX ? -1 : static_cast<int>(sRight));
 
       /* No early exit — always collect all available samples.
        * Variable AR content (IMAX + scope) needs every sample to detect
@@ -3626,6 +3825,24 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
       }
     }
 
+    const auto verticalEvidence = detect_pair_evidence(samples_top, samples_bottom, validSamples);
+    CLog::Log(LOGINFO, "DetectActiveArea: vertical hypothesis={} top-support={} bottom-support={} "
+              "paired={} known-zero={}/{} unknown={}/{} positions={} (diagnostic only)",
+              verticalEvidence.candidate, verticalEvidence.first, verticalEvidence.second,
+              verticalEvidence.paired, verticalEvidence.zeroFirst, verticalEvidence.zeroSecond,
+              verticalEvidence.unknownFirst, verticalEvidence.unknownSecond, validSamples);
+
+    // Do not discard a position containing possible caption/framing evidence,
+    // shrink the denominator, or let that uncertainty form a full-frame vote.
+    if (std::any_of(samples_rejected, samples_rejected + validSamples,
+                    [](bool rejected) { return rejected; }))
+    {
+      CLog::Log(LOGINFO, "DetectActiveArea: rejected spatial evidence in {} positions — "
+                "retaining uncertainty; no geometry published", validSamples);
+      s_detectState.store(DV_DETECT_SKIPPED);
+      goto cleanup;
+    }
+
     DetectResult consensus{};
     if (!detect_samples_consensus(samples_top, samples_bottom, samples_left, samples_right,
                                   validSamples, consensus))
@@ -3639,6 +3856,15 @@ static void DetectActiveAreaFromFile(const std::shared_ptr<DetectSource>& source
     detBottom = consensus.bottom;
     detLeft = consensus.left;
     detRight = consensus.right;
+    if (!(detTop || detBottom || detLeft || detRight))
+    {
+      uint16_t unused = 0;
+      const auto vertical = detect_axis_consensus(samples_top, samples_bottom, validSamples, unused);
+      const auto horizontal = detect_axis_consensus(samples_left, samples_right, validSamples, unused);
+      CLog::Log(LOGINFO, "DetectActiveArea: no positive border consensus in {} positions "
+                "(vertical={} horizontal={}); no detected inset", validSamples,
+                static_cast<int>(vertical), static_cast<int>(horizontal));
+    }
 
     /* Validate and snap to common AR */
     if (detTop || detBottom || detLeft || detRight)
