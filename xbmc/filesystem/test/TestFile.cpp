@@ -417,6 +417,25 @@ TEST(TestFile, AbortShoutcastPartialMetadata)
   CheckShoutcastAbort(4096, std::string(1, '\1') + "StreamTi");
 }
 
+TEST(TestFile, OpenReturnsBufferedHttpPrefix)
+{
+  CPausedHttpSource source(std::chrono::seconds(4));
+  ASSERT_TRUE(source.Start());
+  XFILE::CFile file;
+  const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(file.Open(source.URL(), XFILE::READ_NO_BUFFER));
+  const auto opened = std::chrono::steady_clock::now() - start;
+  char prefix[128];
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(prefix)), file.Read(prefix, sizeof(prefix)));
+  const auto read = std::chrono::steady_clock::now() - start - opened;
+  EXPECT_EQ(std::string(sizeof(prefix), 'a'), std::string(prefix, sizeof(prefix)));
+  // The server stays parked, so the prefix came from bytes that already arrived.
+  EXPECT_TRUE(source.WaitForPause());
+  EXPECT_LT(opened, std::chrono::milliseconds(100));
+  EXPECT_LT(read, std::chrono::milliseconds(100));
+  file.Close();
+}
+
 TEST(TestFile, CloseCachedPausedHttpSource)
 {
   CPausedHttpSource source(std::chrono::seconds(4));
