@@ -367,6 +367,9 @@ void CFileCache::Process()
       iRead = m_source.Read(buffer.get(), maxSourceRead);
     if (iRead <= 0)
     {
+      if (m_bStop)
+        break;
+
       // Check for actual EOF and retry as long as we still have data in our cache
       if (m_writePos < m_fileSize && m_pCache->WaitForData(0, 0ms) > 0)
       {
@@ -658,6 +661,7 @@ void CFileCache::StopThread(bool bWait /*= true*/)
   m_bStop = true;
   //Process could be waiting for seekEvent
   m_seekEvent.Set();
+  m_source.IoControl(IOCTRL_ABORT_READ, nullptr);
   CThread::StopThread(bWait);
 }
 

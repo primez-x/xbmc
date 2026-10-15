@@ -7,12 +7,29 @@
  */
 
 #include "filesystem/File.h"
+
+#include "URL.h"
+#include "filesystem/ShoutcastFile.h"
 #include "test/TestUtils.h"
 
 #include <errno.h>
 #include <string>
 
 #include <gtest/gtest.h>
+
+#if defined(TARGET_LINUX)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <thread>
+#endif
 
 TEST(TestFile, Read)
 {
@@ -210,3 +227,249 @@ TEST(TestFile, SetHidden)
   EXPECT_TRUE(XFILE::CFile::Exists(XBMC_TEMPFILEPATH(file)));
   EXPECT_TRUE(XBMC_DELETETEMPFILE(file));
 }
+
+#if defined(TARGET_LINUX)
+namespace
+{
+class CPausedHttpSource
+{
+public:
+  explicit CPausedHttpSource(std::chrono::milliseconds pause,
+                             int metadataInterval = 0,
+                             std::string metadataPrefix = {})
+    : m_pause(pause), m_metadataInterval(metadataInterval), m_metadataPrefix(metadataPrefix)
+  {
+  }
+
+  ~CPausedHttpSource()
+  {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_release = true;
+      m_condition.notify_all();
+    }
+    if (m_thread.joinable())
+      m_thread.join();
+    if (m_listener >= 0)
+      close(m_listener);
+  }
+
+  bool Start()
+  {
+    m_listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_listener < 0)
+      return false;
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(m_listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+        listen(m_listener, 1) != 0)
+      return false;
+
+    socklen_t size = sizeof(address);
+    if (getsockname(m_listener, reinterpret_cast<sockaddr*>(&address), &size) != 0)
+      return false;
+    m_port = ntohs(address.sin_port);
+    m_thread = std::thread([this] { Serve(); });
+    return true;
+  }
+
+  std::string URL() const { return "http://127.0.0.1:" + std::to_string(m_port) + "/paused"; }
+
+  bool WaitForPause()
+  {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    return m_condition.wait_for(lock, std::chrono::seconds(2), [this] { return m_paused; });
+  }
+
+  void StartPause()
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_startPause = true;
+    m_condition.notify_all();
+  }
+
+  bool IsPaused()
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_paused;
+  }
+
+private:
+  static bool Send(int client, const std::string& data)
+  {
+    size_t sent = 0;
+    while (sent < data.size())
+    {
+      const ssize_t count = send(client, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+      if (count <= 0)
+        return false;
+      sent += count;
+    }
+    return true;
+  }
+
+  void Serve()
+  {
+    pollfd listener{m_listener, POLLIN, 0};
+    if (poll(&listener, 1, 5000) <= 0)
+      return;
+    const int client = accept(m_listener, nullptr, nullptr);
+    if (client < 0)
+      return;
+
+    std::string request;
+    char buffer[1024];
+    while (request.find("\r\n\r\n") == std::string::npos)
+    {
+      pollfd connection{client, POLLIN, 0};
+      if (poll(&connection, 1, 2000) <= 0)
+        break;
+      const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+      if (count <= 0)
+        break;
+      request.append(buffer, count);
+    }
+
+    const std::string metadataHeader = m_metadataInterval > 0
+                                           ? "icy-metaint: " + std::to_string(m_metadataInterval) + "\r\n"
+                                           : "";
+    if (Send(client, "HTTP/1.1 200 OK\r\nContent-Length: " +
+                         std::to_string(8192 + m_metadataPrefix.size()) + "\r\n" + metadataHeader +
+                         "Connection: close\r\n\r\n") &&
+        Send(client, std::string(4096, 'a') + m_metadataPrefix))
+    {
+      {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_paused = true;
+        m_condition.notify_all();
+        m_condition.wait(lock, [this] { return m_startPause || m_release; });
+        if (!m_release)
+          m_condition.wait_for(lock, m_pause, [this] { return m_release; });
+        m_paused = false;
+      }
+      Send(client, std::string(4096, 'b'));
+    }
+    close(client);
+  }
+
+  const std::chrono::milliseconds m_pause;
+  const int m_metadataInterval;
+  const std::string m_metadataPrefix;
+  int m_listener = -1;
+  uint16_t m_port = 0;
+  std::thread m_thread;
+  std::mutex m_mutex;
+  std::condition_variable m_condition;
+  bool m_release = false;
+  bool m_startPause = false;
+  bool m_paused = false;
+};
+void CheckShoutcastAbort(int metadataInterval, const std::string& metadataPrefix)
+{
+  CPausedHttpSource source(std::chrono::milliseconds(0), metadataInterval, metadataPrefix);
+  ASSERT_TRUE(source.Start());
+  XFILE::CShoutcastFile file;
+  ASSERT_TRUE(file.Open(CURL(source.URL())));
+  ASSERT_TRUE(source.WaitForPause());
+  char audio[4096];
+  size_t received = 0;
+  while (received < sizeof(audio))
+  {
+    const ssize_t count = file.Read(audio + received, sizeof(audio) - received);
+    ASSERT_GT(count, 0);
+    received += count;
+  }
+  ASSERT_EQ(sizeof(audio), received);
+  EXPECT_EQ(std::string(sizeof(audio), 'a'), std::string(audio, sizeof(audio)));
+  auto read = std::async(std::launch::async, [&file] {
+    char next;
+    return file.Read(&next, 1);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(0, file.IoControl(XFILE::IOCTRL_ABORT_READ, nullptr));
+  EXPECT_EQ(0, file.IoControl(XFILE::IOCTRL_ABORT_READ, nullptr));
+  EXPECT_EQ(std::future_status::ready, read.wait_for(std::chrono::milliseconds(100)));
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(100));
+  EXPECT_TRUE(source.IsPaused());
+  // Release the server so that a read without the abort returns the tail instead of waiting.
+  source.StartPause();
+  EXPECT_EQ(0, read.get());
+  file.Close();
+  file.Close();
+}
+} // namespace
+
+TEST(TestFile, AbortShoutcastAudio)
+{
+  CheckShoutcastAbort(8192, "");
+}
+
+TEST(TestFile, AbortShoutcastMetadataHeader)
+{
+  CheckShoutcastAbort(4096, "");
+}
+
+TEST(TestFile, AbortShoutcastPartialMetadata)
+{
+  CheckShoutcastAbort(4096, std::string(1, '\1') + "StreamTi");
+}
+
+TEST(TestFile, OpenReturnsBufferedHttpPrefix)
+{
+  CPausedHttpSource source(std::chrono::seconds(4));
+  ASSERT_TRUE(source.Start());
+  XFILE::CFile file;
+  const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(file.Open(source.URL(), XFILE::READ_NO_BUFFER));
+  const auto opened = std::chrono::steady_clock::now() - start;
+  char prefix[128];
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(prefix)), file.Read(prefix, sizeof(prefix)));
+  const auto read = std::chrono::steady_clock::now() - start - opened;
+  EXPECT_EQ(std::string(sizeof(prefix), 'a'), std::string(prefix, sizeof(prefix)));
+  // The server stays parked, so the prefix came from bytes that already arrived.
+  EXPECT_TRUE(source.WaitForPause());
+  EXPECT_LT(opened, std::chrono::milliseconds(100));
+  EXPECT_LT(read, std::chrono::milliseconds(100));
+  file.Close();
+}
+
+TEST(TestFile, CloseCachedPausedHttpSource)
+{
+  CPausedHttpSource source(std::chrono::seconds(4));
+  ASSERT_TRUE(source.Start());
+  XFILE::CFile file;
+  ASSERT_TRUE(file.Open(source.URL(), XFILE::READ_CACHED | XFILE::READ_NO_BUFFER));
+  ASSERT_TRUE(source.WaitForPause());
+  source.StartPause();
+  char prefix[128];
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(prefix)), file.Read(prefix, sizeof(prefix)));
+  EXPECT_EQ(std::string(sizeof(prefix), 'a'), std::string(prefix, sizeof(prefix)));
+
+  // Allow the cache producer to consume the prefix and wait for the next body bytes.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const auto start = std::chrono::steady_clock::now();
+  file.Close();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(source.IsPaused());
+  EXPECT_LT(elapsed, std::chrono::milliseconds(100));
+}
+
+TEST(TestFile, ReadCachedPausedHttpSource)
+{
+  CPausedHttpSource source(std::chrono::seconds(1));
+  ASSERT_TRUE(source.Start());
+  XFILE::CFile file;
+  ASSERT_TRUE(file.Open(source.URL(), XFILE::READ_CACHED | XFILE::READ_NO_BUFFER));
+  ASSERT_TRUE(source.WaitForPause());
+  source.StartPause();
+  std::string body(8192, '\0');
+  ASSERT_EQ(static_cast<ssize_t>(body.size()), file.Read(body.data(), body.size()));
+  EXPECT_EQ(std::string(4096, 'a') + std::string(4096, 'b'), body);
+  char byte;
+  EXPECT_EQ(0, file.Read(&byte, 1));
+  file.Close();
+}
+#endif

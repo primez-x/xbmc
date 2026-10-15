@@ -76,10 +76,18 @@ CURLMcode DllLibCurl::multi_remove_handle(CURLM* multi_handle, CURL_HANDLE* easy
   return curl_multi_remove_handle(multi_handle, easy_handle);
 }
 
-CURLMcode DllLibCurl::multi_fdset(
-    CURLM* multi_handle, fd_set* read_fd_set, fd_set* write_fd_set, fd_set* exc_fd_set, int* max_fd)
+CURLMcode DllLibCurl::multi_poll(CURLM* multi_handle,
+                                 curl_waitfd* extra_fds,
+                                 unsigned int extra_nfds,
+                                 int timeout_ms,
+                                 int* numfds)
 {
-  return curl_multi_fdset(multi_handle, read_fd_set, write_fd_set, exc_fd_set, max_fd);
+  return curl_multi_poll(multi_handle, extra_fds, extra_nfds, timeout_ms, numfds);
+}
+
+CURLMcode DllLibCurl::multi_wakeup(CURLM* multi_handle)
+{
+  return curl_multi_wakeup(multi_handle);
 }
 
 CURLMcode DllLibCurl::multi_timeout(CURLM* multi_handle, long* timeout)

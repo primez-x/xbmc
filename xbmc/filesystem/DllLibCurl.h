@@ -12,14 +12,16 @@
 
 #include <stdio.h>
 #include <string>
-#include <sys/time.h>
-#include <sys/types.h>
 #include <type_traits>
 #include <vector>
 
 #define CURL CURL_HANDLE
 #include <curl/curl.h>
 #undef CURL
+
+#if !CURL_AT_LEAST_VERSION(7, 68, 0)
+#error "CCurlFile requires libcurl 7.68.0 or newer for curl_multi_poll/curl_multi_wakeup"
+#endif
 
 namespace XCURL
 {
@@ -51,11 +53,12 @@ public:
   CURLMcode multi_add_handle(CURLM* multi_handle, CURL_HANDLE* easy_handle);
   CURLMcode multi_perform(CURLM* multi_handle, int* running_handles);
   CURLMcode multi_remove_handle(CURLM* multi_handle, CURL_HANDLE* easy_handle);
-  CURLMcode multi_fdset(CURLM* multi_handle,
-                        fd_set* read_fd_set,
-                        fd_set* write_fd_set,
-                        fd_set* exc_fd_set,
-                        int* max_fd);
+  CURLMcode multi_poll(CURLM* multi_handle,
+                       curl_waitfd* extra_fds,
+                       unsigned int extra_nfds,
+                       int timeout_ms,
+                       int* numfds);
+  CURLMcode multi_wakeup(CURLM* multi_handle);
   CURLMcode multi_timeout(CURLM* multi_handle, long* timeout);
   CURLMsg* multi_info_read(CURLM* multi_handle, int* msgs_in_queue);
   CURLMcode multi_cleanup(CURLM* handle);
