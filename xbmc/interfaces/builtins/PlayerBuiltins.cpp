@@ -644,7 +644,12 @@ int PlayOrQueueMedia(const std::vector<std::string>& params, bool forcePlay)
 
   if (forcePlay)
   {
-    if ((item.IsAudio() || item.IsVideo()) && !item.IsSmartPlayList() && !item.IsPVR())
+    // An explicit music or video hint lets extensionless streams start inside the playlist
+    const int typeHint = item.GetProperty("playlist_type_hint").asInteger32(PLAYLIST::TYPE_NONE);
+    const bool hasMediaHint =
+        !item.m_bIsFolder && (typeHint == PLAYLIST::TYPE_MUSIC || typeHint == PLAYLIST::TYPE_VIDEO);
+    if ((item.IsAudio() || item.IsVideo() || hasMediaHint) && !item.IsSmartPlayList() &&
+        !item.IsPVR())
     {
       if (!item.HasProperty("playlist_type_hint"))
         item.SetProperty("playlist_type_hint", GetPlayListId(item));
@@ -672,8 +677,9 @@ int PlayOrQueueMedia(const std::vector<std::string>& params, bool forcePlay)
  *           params[1,...] = "resume" to force resuming (optional).
  *           params[1,...] = "noresume" to force not resuming (optional).
  *           params[1,...] = "playoffset=<offset>" to start playback from a given position in a playlist (optional).
- *           params[1,...] = "playlist_type_hint=<id>" to set the playlist type if a playlist file (e.g. STRM) is played (optional),
- *                           for <id> value refer to PLAYLIST::TYPE_MUSIC / PLAYLIST::TYPE_VIDEO values, if not set will fallback to music playlist.
+ *           params[1,...] = "playlist_type_hint=<id>" to set the playlist type if a playlist file (e.g. STRM) or
+ *                           an extensionless stream is played (optional), for <id> value refer to
+ *                           PLAYLIST::TYPE_MUSIC / PLAYLIST::TYPE_VIDEO values, if not set will fallback to music playlist.
  */
 int PlayMedia(const std::vector<std::string>& params)
 {
