@@ -89,9 +89,9 @@ namespace XBMCAddon
     void Player::playStream(const String& item, const xbmcgui::ListItem* plistitem, bool windowed)
     {
       XBMC_TRACE;
-      DelayedCallGuard dc(languageHook);
       if (!item.empty())
       {
+        DelayedCallGuard dc(languageHook);
         // set fullscreen or windowed
         CMediaSettings::GetInstance().SetMediaStartWindowed(windowed);
 
@@ -119,31 +119,38 @@ namespace XBMCAddon
     void Player::playCurrent(bool windowed)
     {
       XBMC_TRACE;
-      DelayedCallGuard dc(languageHook);
-      // set fullscreen or windowed
-      CMediaSettings::GetInstance().SetMediaStartWindowed(windowed);
+      int current;
+      {
+        XBMCAddonUtils::GuiLock lock(languageHook, false);
+        // set fullscreen or windowed
+        CMediaSettings::GetInstance().SetMediaStartWindowed(windowed);
 
-      // play current file in playlist
-      if (CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist() != iPlayList)
-        CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
-      CServiceBroker::GetAppMessenger()->SendMsg(
-          TMSG_PLAYLISTPLAYER_PLAY, CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx());
+        // play current file in playlist
+        if (CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist() != iPlayList)
+          CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
+        current = CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx();
+      }
+      DelayedCallGuard dc(languageHook);
+      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, current);
     }
 
     void Player::playPlaylist(const PlayList* playlist, bool windowed, int startpos)
     {
       XBMC_TRACE;
-      DelayedCallGuard dc(languageHook);
       if (playlist != NULL)
       {
-        // set fullscreen or windowed
-        CMediaSettings::GetInstance().SetMediaStartWindowed(windowed);
+        {
+          XBMCAddonUtils::GuiLock lock(languageHook, false);
+          // set fullscreen or windowed
+          CMediaSettings::GetInstance().SetMediaStartWindowed(windowed);
 
-        // play a python playlist (a playlist from playlistplayer.cpp)
-        iPlayList = playlist->getPlayListId();
-        CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
-        if (startpos > -1)
-          CServiceBroker::GetPlaylistPlayer().SetCurrentItemIdx(startpos);
+          // play a python playlist (a playlist from playlistplayer.cpp)
+          iPlayList = playlist->getPlayListId();
+          CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
+          if (startpos > -1)
+            CServiceBroker::GetPlaylistPlayer().SetCurrentItemIdx(startpos);
+        }
+        DelayedCallGuard dc(languageHook);
         CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, startpos);
       }
       else
@@ -181,17 +188,17 @@ namespace XBMCAddon
     void Player::playselected(int selected)
     {
       XBMC_TRACE;
-      DelayedCallGuard dc(languageHook);
-
-      if (CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist() != iPlayList)
       {
-        CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
+        XBMCAddonUtils::GuiLock lock(languageHook, false);
+        if (CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist() != iPlayList)
+        {
+          CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(iPlayList);
+        }
+        CServiceBroker::GetPlaylistPlayer().SetCurrentItemIdx(selected);
       }
-      CServiceBroker::GetPlaylistPlayer().SetCurrentItemIdx(selected);
 
+      DelayedCallGuard dc(languageHook);
       CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, selected);
-      //CServiceBroker::GetPlaylistPlayer().Play(selected);
-      //CLog::Log(LOGINFO, "Current Song After Play: {}", CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx());
     }
 
     void Player::OnPlayBackStarted(const CFileItem &file)
