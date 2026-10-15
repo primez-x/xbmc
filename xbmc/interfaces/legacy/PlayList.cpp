@@ -35,27 +35,23 @@ namespace XBMCAddon
 
     void PlayList::add(const String& url, XBMCAddon::xbmcgui::ListItem* listitem, int index)
     {
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      CFileItemList items;
+
+      if (listitem != nullptr)
       {
-        CFileItemList items;
+        // The optional ListItem may already belong to the playlist.
+        listitem->item->SetPath(url);
+        items.Add(listitem->item);
+      }
+      else
+      {
+        CFileItemPtr item(new CFileItem(url, false));
+        item->SetLabel(url);
+        items.Add(item);
+      }
 
-        if (listitem != NULL)
-        {
-          // The optional ListItem may already belong to the playlist.
-          listitem->item->SetPath(url);
-
-          items.Add(listitem->item);
-        }
-        else
-        {
-          CFileItemPtr item(new CFileItem(url, false));
-          item->SetLabel(url);
-
-          items.Add(item);
-        }
-
-        pPlayList->Insert(items, index);
-      });
+      pPlayList->Insert(items, index);
     }
 
     bool PlayList::load(const char* cFileName)
@@ -63,100 +59,79 @@ namespace XBMCAddon
       CFileItem item(cFileName);
       item.SetPath(cFileName);
 
-      if (item.IsPlayList())
-      {
-        // load playlist and copy al items to existing playlist
-
-        // load a playlist like .m3u, .pls
-        // first get correct factory to load playlist
-        std::unique_ptr<PLAYLIST::CPlayList> pPlayList(PLAYLIST::CPlayListFactory::Create(item));
-        if (nullptr != pPlayList)
-        {
-          // Parse the file on the caller thread.
-          if (!pPlayList->Load(item.GetPath()))
-            //hmmm unable to load playlist?
-            return false;
-
-          return XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
-          {
-            CServiceBroker::GetPlaylistPlayer().ClearPlaylist(this->iPlayList);
-
-            for (int i = 0; i < pPlayList->size(); ++i)
-            {
-              CFileItemPtr playListItem = (*pPlayList)[i];
-              if (playListItem->GetLabel().empty())
-                playListItem->SetLabel(URIUtils::GetFileName(playListItem->GetPath()));
-
-              this->pPlayList->Add(playListItem);
-            }
-          });
-        }
-      }
-      else
-        // filename is not a valid playlist
+      if (!item.IsPlayList())
         throw PlayListException("Not a valid playlist");
 
+      std::unique_ptr<PLAYLIST::CPlayList> playlist(PLAYLIST::CPlayListFactory::Create(item));
+      if (!playlist)
+        return true;
+
+      // Parse the file before acquiring GUI ownership.
+      if (!playlist->Load(item.GetPath()))
+        return false;
+
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      CServiceBroker::GetPlaylistPlayer().ClearPlaylist(iPlayList);
+      for (int i = 0; i < playlist->size(); ++i)
+      {
+        CFileItemPtr playListItem = (*playlist)[i];
+        if (playListItem->GetLabel().empty())
+          playListItem->SetLabel(URIUtils::GetFileName(playListItem->GetPath()));
+        pPlayList->Add(playListItem);
+      }
       return true;
     }
 
     void PlayList::remove(const char* filename)
     {
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Remove(filename); });
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      pPlayList->Remove(filename);
     }
 
     void PlayList::clear()
     {
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Clear(); });
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      pPlayList->Clear();
     }
 
     int PlayList::size()
     {
-      int result = 0;
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { result = pPlayList->size(); });
-      return result;
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      return pPlayList->size();
     }
 
     void PlayList::shuffle()
     {
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Shuffle(); });
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      pPlayList->Shuffle();
     }
 
     void PlayList::unshuffle()
     {
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->UnShuffle(); });
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      pPlayList->UnShuffle();
     }
 
     int PlayList::getposition()
     {
-      int result = -1;
-      XBMCAddonUtils::RunOnApplicationThread(
-          languageHook, [&] { result = CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx(); });
-      return result;
+      XBMCAddonUtils::GuiLock lock(languageHook, false);
+      return CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx();
     }
 
     XBMCAddon::xbmcgui::ListItem* PlayList::operator [](long i)
     {
-      CFileItemPtr ptr;
-      bool validIndex = false;
-      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
+      CFileItemPtr item;
       {
-        const int iPlayListSize = pPlayList->size();
-
-        long pos = i;
-        if (pos < 0)
-          pos += iPlayListSize;
-
-        if (pos < 0 || pos >= iPlayListSize)
-          return;
-
-        ptr = (*pPlayList)[pos];
-        validIndex = true;
-      });
-
-      if (!validIndex)
-        throw PlayListException("array out of bound");
-
-      return new XBMCAddon::xbmcgui::ListItem(ptr);
+        XBMCAddonUtils::GuiLock lock(languageHook, false);
+        const int playlistSize = pPlayList->size();
+        long position = i;
+        if (position < 0)
+          position += playlistSize;
+        if (position < 0 || position >= playlistSize)
+          throw PlayListException("array out of bound");
+        item = (*pPlayList)[position];
+      }
+      return new XBMCAddon::xbmcgui::ListItem(item);
     }
   }
 }

@@ -292,37 +292,28 @@ namespace XBMCAddon
     String getInfoLabel(const char* cLine)
     {
       XBMC_TRACE;
-      String result;
       if (!cLine)
-        return result;
+        return {};
 
-      XBMCAddonUtils::RunOnApplicationThread(LanguageHook::GetLanguageHook(), [&]
-      {
-        CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
-        int ret = infoMgr.TranslateString(cLine);
-        // Resolve formatted labels when no single InfoTag matches.
-        if (ret == 0)
-          result = GUILIB::GUIINFO::CGUIInfoLabel::GetLabel(cLine, INFO::DEFAULT_CONTEXT);
-        else
-          result = infoMgr.GetLabel(ret, INFO::DEFAULT_CONTEXT);
-      });
-      return result;
+      XBMCAddonUtils::GuiLock lock(LanguageHook::GetLanguageHook(), false);
+      CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
+      int ret = infoMgr.TranslateString(cLine);
+      // Resolve formatted labels when no single InfoTag matches.
+      if (ret == 0)
+        return GUILIB::GUIINFO::CGUIInfoLabel::GetLabel(cLine, INFO::DEFAULT_CONTEXT);
+      return infoMgr.GetLabel(ret, INFO::DEFAULT_CONTEXT);
     }
 
     String getInfoImage(const char * infotag)
     {
       XBMC_TRACE;
-      String result;
       if (!infotag)
-        return result;
+        return {};
 
-      XBMCAddonUtils::RunOnApplicationThread(LanguageHook::GetLanguageHook(), [&]
-      {
-        CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
-        int ret = infoMgr.TranslateString(infotag);
-        result = infoMgr.GetImage(ret, WINDOW_INVALID);
-      });
-      return result;
+      XBMCAddonUtils::GuiLock lock(LanguageHook::GetLanguageHook(), false);
+      CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
+      int ret = infoMgr.TranslateString(infotag);
+      return infoMgr.GetImage(ret, WINDOW_INVALID);
     }
 
     void playSFX(const char* filename, bool useCached)
