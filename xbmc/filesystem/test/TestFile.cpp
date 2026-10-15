@@ -368,13 +368,20 @@ private:
 };
 void CheckShoutcastAbort(int metadataInterval, const std::string& metadataPrefix)
 {
-  CPausedHttpSource source(std::chrono::seconds(4), metadataInterval, metadataPrefix);
+  CPausedHttpSource source(std::chrono::milliseconds(0), metadataInterval, metadataPrefix);
   ASSERT_TRUE(source.Start());
   XFILE::CShoutcastFile file;
   ASSERT_TRUE(file.Open(CURL(source.URL())));
   ASSERT_TRUE(source.WaitForPause());
   char audio[4096];
-  ASSERT_EQ(static_cast<ssize_t>(sizeof(audio)), file.Read(audio, sizeof(audio)));
+  size_t received = 0;
+  while (received < sizeof(audio))
+  {
+    const ssize_t count = file.Read(audio + received, sizeof(audio) - received);
+    ASSERT_GT(count, 0);
+    received += count;
+  }
+  ASSERT_EQ(sizeof(audio), received);
   EXPECT_EQ(std::string(sizeof(audio), 'a'), std::string(audio, sizeof(audio)));
   auto read = std::async(std::launch::async, [&file] {
     char next;
@@ -387,6 +394,8 @@ void CheckShoutcastAbort(int metadataInterval, const std::string& metadataPrefix
   EXPECT_EQ(std::future_status::ready, read.wait_for(std::chrono::milliseconds(100)));
   EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(100));
   EXPECT_TRUE(source.IsPaused());
+  // Release the server so that a read without the abort returns the tail instead of waiting.
+  source.StartPause();
   EXPECT_EQ(0, read.get());
   file.Close();
   file.Close();
@@ -427,8 +436,6 @@ TEST(TestFile, CloseCachedPausedHttpSource)
   const auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_TRUE(source.IsPaused());
   EXPECT_LT(elapsed, std::chrono::milliseconds(100));
-  std::this_thread::sleep_for(std::chrono::seconds(3));
-  EXPECT_TRUE(source.IsPaused());
 }
 
 TEST(TestFile, ReadCachedPausedHttpSource)

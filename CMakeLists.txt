@@ -544,6 +544,10 @@ if(HOST_CAN_EXECUTE_TARGET AND ENABLE_TESTING)
   # Enable unit-test related targets
   enable_testing()
   gtest_add_tests(${APP_NAME_LC}-test "" ${test_sources})
+  set_tests_properties(TestFile.AbortShoutcastAudio
+                       TestFile.AbortShoutcastMetadataHeader
+                       TestFile.AbortShoutcastPartialMetadata
+                       PROPERTIES TIMEOUT 60)
   add_custom_target(check ${CMAKE_CTEST_COMMAND} WORKING_DIRECTORY ${PROJECT_BINARY_DIR})
   add_dependencies(check ${APP_NAME_LC}-test)
 

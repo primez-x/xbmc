@@ -75,7 +75,7 @@ typedef enum {
   IOCTRL_SET_CACHE     = 8,  /**< CFileCache */
   IOCTRL_SET_RETRY     = 16, /**< Enable/disable retry within the protocol handler (if supported) */
   IOCTRL_CACHE_SET_WAIT_CALLBACK = 32, /**< std::function<void()> invoked on the reader thread while waiting for cached data */
-  IOCTRL_ABORT_READ = 64, /**< Non-blocking, one-way abort. The source stays read-terminal until destruction. */
+  IOCTRL_ABORT_READ = 64, /**< Non-blocking, one-way request to abort future source waits. Reads can return bytes already buffered. The request persists until source destruction. Sources without support return -1. */
 } EIoControl;
 
 enum CURLOPTIONTYPE
