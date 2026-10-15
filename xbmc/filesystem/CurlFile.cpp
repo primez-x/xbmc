@@ -244,7 +244,7 @@ size_t CCurlFile::CReadState::WriteCallback(char *buffer, size_t size, size_t ni
   return size * nitems;
 }
 
-CCurlFile::CReadState::CReadState()
+CCurlFile::CReadState::CReadState(const std::atomic<bool>& abortRead) : m_abortRead(abortRead)
 {
   m_easyHandle = NULL;
   m_multiHandle = NULL;
@@ -434,7 +434,7 @@ CCurlFile::CCurlFile()
   m_ftppasvip = false;
   m_bufferSize = 32768;
   m_postdataset = false;
-  m_state = new CReadState();
+  m_state = new CReadState(m_abortRead);
   m_oldState = NULL;
   m_skipshout = false;
   m_httpresponse = -1;
@@ -1431,7 +1431,7 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
     {
       CURL url(m_url);
       m_oldState          = m_state;
-      m_state             = new CReadState();
+      m_state             = new CReadState(m_abortRead);
       m_state->m_fileSize = m_oldState->m_fileSize;
       g_curlInterface.easy_acquire(url.GetProtocol().c_str(),
                                   url.GetHostName().c_str(),
@@ -1693,7 +1693,7 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
   // doesn't exceed required size already
   while (m_buffer.getMaxReadSize() < want && m_buffer.getMaxWriteSize() > 0 )
   {
-    if (m_cancelled)
+    if (m_cancelled || m_abortRead.load())
       return FILLBUFFER_NO_DATA;
 
     /* if there is data in overflow buffer, try to use that first */
@@ -2090,6 +2090,12 @@ bool CCurlFile::GetCookies(const CURL &url, std::string &cookies)
 
 int CCurlFile::IoControl(EIoControl request, void* param)
 {
+  if (request == IOCTRL_ABORT_READ)
+  {
+    m_abortRead.store(true);
+    return 0;
+  }
+
   if (request == IOCTRL_SEEK_POSSIBLE)
     return m_seekable ? 1 : 0;
 

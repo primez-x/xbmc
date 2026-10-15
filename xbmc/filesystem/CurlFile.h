@@ -12,6 +12,7 @@
 #include "utils/HttpHeader.h"
 #include "utils/RingBuffer.h"
 
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -97,8 +98,9 @@ namespace XFILE
       class CReadState
       {
       public:
-          CReadState();
+          explicit CReadState(const std::atomic<bool>& abortRead);
           ~CReadState();
+          const std::atomic<bool>& m_abortRead;
           CURL_HANDLE* m_easyHandle;
           CURLM* m_multiHandle;
 
@@ -150,6 +152,7 @@ namespace XFILE
       std::string GetInfoString(int infoType);
 
     protected:
+      std::atomic<bool> m_abortRead{false};
       CReadState* m_state;
       CReadState* m_oldState;
       unsigned int m_bufferSize;
