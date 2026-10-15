@@ -53,7 +53,8 @@ namespace XBMCAddonUtils
 
   // Release the language lock while the application thread runs the callback.
   // Return false when the messenger stops or discards the callback.
-  bool RunOnApplicationThread(const std::function<void()>& function);
+  bool RunOnApplicationThread(XBMCAddon::LanguageHook* languageHook,
+                              const std::function<void()>& function);
 
   class InvertSingleLockGuard
   {

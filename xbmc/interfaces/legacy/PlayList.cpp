@@ -35,7 +35,7 @@ namespace XBMCAddon
 
     void PlayList::add(const String& url, XBMCAddon::xbmcgui::ListItem* listitem, int index)
     {
-      XBMCAddonUtils::RunOnApplicationThread([&]
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
       {
         CFileItemList items;
 
@@ -77,7 +77,7 @@ namespace XBMCAddon
             //hmmm unable to load playlist?
             return false;
 
-          return XBMCAddonUtils::RunOnApplicationThread([&]
+          return XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
           {
             CServiceBroker::GetPlaylistPlayer().ClearPlaylist(this->iPlayList);
 
@@ -101,36 +101,36 @@ namespace XBMCAddon
 
     void PlayList::remove(const char* filename)
     {
-      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Remove(filename); });
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Remove(filename); });
     }
 
     void PlayList::clear()
     {
-      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Clear(); });
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Clear(); });
     }
 
     int PlayList::size()
     {
       int result = 0;
-      XBMCAddonUtils::RunOnApplicationThread([&] { result = pPlayList->size(); });
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { result = pPlayList->size(); });
       return result;
     }
 
     void PlayList::shuffle()
     {
-      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Shuffle(); });
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->Shuffle(); });
     }
 
     void PlayList::unshuffle()
     {
-      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->UnShuffle(); });
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&] { pPlayList->UnShuffle(); });
     }
 
     int PlayList::getposition()
     {
       int result = -1;
       XBMCAddonUtils::RunOnApplicationThread(
-          [&] { result = CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx(); });
+          languageHook, [&] { result = CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx(); });
       return result;
     }
 
@@ -138,7 +138,7 @@ namespace XBMCAddon
     {
       CFileItemPtr ptr;
       bool validIndex = false;
-      XBMCAddonUtils::RunOnApplicationThread([&]
+      XBMCAddonUtils::RunOnApplicationThread(languageHook, [&]
       {
         const int iPlayListSize = pPlayList->size();
 

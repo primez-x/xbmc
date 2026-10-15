@@ -83,6 +83,12 @@ void CApplicationMessenger::Cleanup()
   }
 }
 
+void CApplicationMessenger::Stop()
+{
+  std::unique_lock<CCriticalSection> lock(m_critSection);
+  m_bStop = true;
+}
+
 int CApplicationMessenger::SendMsg(ThreadMessage&& message, bool wait)
 {
   std::shared_ptr<CEvent> waitEvent;
@@ -109,13 +115,12 @@ int CApplicationMessenger::SendMsg(ThreadMessage&& message, bool wait)
     }
   }
 
+  std::unique_lock<CCriticalSection> lock(m_critSection);
 
   if (m_bStop)
     return -1;
 
   ThreadMessage* msg = new ThreadMessage(std::move(message));
-
-  std::unique_lock<CCriticalSection> lock(m_critSection);
 
   if (msg->dwMessage == TMSG_GUI_MESSAGE)
     m_vecWindowMessages.push(msg);

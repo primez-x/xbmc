@@ -296,7 +296,7 @@ namespace XBMCAddon
       if (!cLine)
         return result;
 
-      XBMCAddonUtils::RunOnApplicationThread([&]
+      XBMCAddonUtils::RunOnApplicationThread(LanguageHook::GetLanguageHook(), [&]
       {
         CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
         int ret = infoMgr.TranslateString(cLine);
@@ -316,7 +316,7 @@ namespace XBMCAddon
       if (!infotag)
         return result;
 
-      XBMCAddonUtils::RunOnApplicationThread([&]
+      XBMCAddonUtils::RunOnApplicationThread(LanguageHook::GetLanguageHook(), [&]
       {
         CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
         int ret = infoMgr.TranslateString(infotag);

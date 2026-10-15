@@ -43,7 +43,8 @@ namespace XBMCAddonUtils
       m_languageHook->DelayedCallClose();
   }
 
-  bool RunOnApplicationThread(const std::function<void()>& function)
+  bool RunOnApplicationThread(XBMCAddon::LanguageHook* languageHook,
+                              const std::function<void()>& function)
   {
     struct CallData
     {
@@ -69,7 +70,7 @@ namespace XBMCAddonUtils
         &data};
 
     {
-      XBMCAddon::DelayedCallGuard guard;
+      XBMCAddon::DelayedCallGuard guard(languageHook);
       CServiceBroker::GetAppMessenger()->SendMsg(TMSG_CALLBACK, -1, -1, &callback);
     }
 
