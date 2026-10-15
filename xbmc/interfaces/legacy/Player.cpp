@@ -131,7 +131,7 @@ namespace XBMCAddon
       DelayedCallGuard dc(languageHook);
       // The main thread selects the playlist and plays in one message, so a stop
       // notification that it handles in between cannot reset the selection.
-      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_PLAY, iPlayList, current);
+      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, current, iPlayList);
     }
 
     void Player::playPlaylist(const PlayList* playlist, bool windowed, int startpos)
@@ -150,7 +150,7 @@ namespace XBMCAddon
         DelayedCallGuard dc(languageHook);
         // The main thread selects the playlist and plays in one message, so a stop
         // notification that it handles in between cannot reset the selection.
-        CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_PLAY, iPlayList, startpos);
+        CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, startpos, iPlayList);
       }
       else
         playCurrent(windowed);
@@ -190,7 +190,7 @@ namespace XBMCAddon
       DelayedCallGuard dc(languageHook);
       // The main thread selects the playlist and plays in one message, so a stop
       // notification that it handles in between cannot reset the selection.
-      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_PLAY, iPlayList, selected);
+      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_PLAYLISTPLAYER_PLAY, selected, iPlayList);
     }
 
     void Player::OnPlayBackStarted(const CFileItem &file)
