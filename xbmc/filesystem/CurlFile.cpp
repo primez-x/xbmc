@@ -244,7 +244,7 @@ size_t CCurlFile::CReadState::WriteCallback(char *buffer, size_t size, size_t ni
   return size * nitems;
 }
 
-CCurlFile::CReadState::CReadState(const std::atomic<bool>& abortRead) : m_abortRead(abortRead)
+CCurlFile::CReadState::CReadState(ReadAbort& readAbort) : m_readAbort(readAbort)
 {
   m_easyHandle = NULL;
   m_multiHandle = NULL;
@@ -434,7 +434,7 @@ CCurlFile::CCurlFile()
   m_ftppasvip = false;
   m_bufferSize = 32768;
   m_postdataset = false;
-  m_state = new CReadState(m_abortRead);
+  m_state = new CReadState(m_readAbort);
   m_oldState = NULL;
   m_skipshout = false;
   m_httpresponse = -1;
@@ -1431,7 +1431,7 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
     {
       CURL url(m_url);
       m_oldState          = m_state;
-      m_state             = new CReadState(m_abortRead);
+      m_state             = new CReadState(m_readAbort);
       m_state->m_fileSize = m_oldState->m_fileSize;
       g_curlInterface.easy_acquire(url.GetProtocol().c_str(),
                                   url.GetHostName().c_str(),
@@ -1685,15 +1685,12 @@ ssize_t CCurlFile::CReadState::Read(void* lpBuf, size_t uiBufSize)
 int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
 {
   int retry = 0;
-  fd_set fdread;
-  fd_set fdwrite;
-  fd_set fdexcep;
 
   // only attempt to fill buffer if transactions still running and buffer
   // doesn't exceed required size already
   while (m_buffer.getMaxReadSize() < want && m_buffer.getMaxWriteSize() > 0 )
   {
-    if (m_cancelled || m_abortRead.load())
+    if (m_cancelled || m_readAbort.requested.load())
       return FILLBUFFER_NO_DATA;
 
     /* if there is data in overflow buffer, try to use that first */
@@ -1827,69 +1824,27 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
     {
       case CURLM_OK:
       {
-        int maxfd = -1;
-        FD_ZERO(&fdread);
-        FD_ZERO(&fdwrite);
-        FD_ZERO(&fdexcep);
-
-        // get file descriptors from the transfers
-        g_curlInterface.multi_fdset(m_multiHandle, &fdread, &fdwrite, &fdexcep, &maxfd);
-
         long timeout = 0;
         if (CURLM_OK != g_curlInterface.multi_timeout(m_multiHandle, &timeout) || timeout == -1 || timeout < 200)
           timeout = 200;
 
-        XbmcThreads::EndTime<> endTime{std::chrono::milliseconds(timeout)};
-        int rc;
-
-        do
         {
-          /* On success the value of maxfd is guaranteed to be >= -1. We call
-           * select(maxfd + 1, ...); specially in case of (maxfd == -1) there are
-           * no fds ready yet so we call select(0, ...) --or Sleep() on Windows--
-           * to sleep 100ms, which is the minimum suggested value in the
-           * curl_multi_fdset() doc.
-           */
-          if (maxfd == -1)
-          {
-#ifdef TARGET_WINDOWS
-            /* Windows does not support using select() for sleeping without a dummy
-             * socket. Instead use Windows' Sleep() and sleep for 100ms which is the
-             * minimum suggested value in the curl_multi_fdset() doc.
-             */
-            KODI::TIME::Sleep(100ms);
-            rc = 0;
-#else
-            /* Portable sleep for platforms other than Windows. */
-            struct timeval wait = { 0, 100 * 1000 }; /* 100ms */
-            rc = select(0, NULL, NULL, NULL, &wait);
-#endif
-          }
-          else
-          {
-            unsigned int time_left = endTime.GetTimeLeft().count();
-            struct timeval wait = { (int)time_left / 1000, ((int)time_left % 1000) * 1000 };
-            rc = select(maxfd + 1, &fdread, &fdwrite, &fdexcep, &wait);
-          }
-#ifdef TARGET_WINDOWS
-        } while(rc == SOCKET_ERROR && WSAGetLastError() == WSAEINTR);
-#else
-        } while(rc == SOCKET_ERROR && errno == EINTR);
-#endif
-
-        if(rc == SOCKET_ERROR)
+          std::unique_lock<CCriticalSection> lock(m_readAbort.lock);
+          if (m_readAbort.requested.load())
+            return FILLBUFFER_NO_DATA;
+          m_readAbort.polling = m_multiHandle;
+        }
+        int numfds = 0;
+        const CURLMcode pollResult = g_curlInterface.multi_poll(
+            m_multiHandle, nullptr, 0, static_cast<int>(timeout), &numfds);
         {
-#ifdef TARGET_WINDOWS
-          char buf[256];
-          strerror_s(buf, 256, WSAGetLastError());
-          CLog::Log(LOGERROR, "CCurlFile::CReadState::{} - ({}) Failed with socket error:{}",
-                    __FUNCTION__, fmt::ptr(this), buf);
-#else
-          char const * str = strerror(errno);
-          CLog::Log(LOGERROR, "CCurlFile::CReadState::{} - ({}) Failed with socket error:{}",
-                    __FUNCTION__, fmt::ptr(this), str);
-#endif
-
+          std::unique_lock<CCriticalSection> lock(m_readAbort.lock);
+          m_readAbort.polling = nullptr;
+        }
+        if (pollResult != CURLM_OK)
+        {
+          CLog::Log(LOGERROR, "CCurlFile::CReadState::{} - ({}) curl_multi_poll failed with code {}",
+                    __FUNCTION__, fmt::ptr(this), pollResult);
           return FILLBUFFER_FAIL;
         }
       }
@@ -2092,7 +2047,16 @@ int CCurlFile::IoControl(EIoControl request, void* param)
 {
   if (request == IOCTRL_ABORT_READ)
   {
-    m_abortRead.store(true);
+    m_readAbort.requested.store(true);
+    CURLMcode wakeResult = CURLM_OK;
+    {
+      std::unique_lock<CCriticalSection> lock(m_readAbort.lock);
+      if (m_readAbort.polling)
+        wakeResult = g_curlInterface.multi_wakeup(m_readAbort.polling);
+    }
+    if (wakeResult != CURLM_OK)
+      CLog::Log(LOGDEBUG, "CCurlFile::{} - curl_multi_wakeup failed with code {}", __FUNCTION__,
+                wakeResult);
     return 0;
   }
 

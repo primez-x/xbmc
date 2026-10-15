@@ -141,9 +141,13 @@ ssize_t CShoutcastFile::Read(void* lpBuf, size_t uiBufSize)
   if (m_currint >= m_metaint && m_metaint > 0)
   {
     unsigned char header;
-    m_file.Read(&header,1);
-    ReadTruncated(m_buffer, header*16);
-    ExtractTagInfo(m_buffer);
+    const ssize_t headerRead = m_file.Read(&header, 1);
+    if (headerRead <= 0)
+      return headerRead;
+    if (!ReadTruncated(m_buffer, header * 16))
+      return 0;
+    if (header > 0)
+      ExtractTagInfo(m_buffer);
     m_discarded += header*16+1;
     m_currint = 0;
   }
@@ -312,19 +316,25 @@ bool CShoutcastFile::ExtractTagInfo(const char* buf)
   return result;
 }
 
-void CShoutcastFile::ReadTruncated(char* buf2, int size)
+bool CShoutcastFile::ReadTruncated(char* buf2, int size)
 {
   char* buf = buf2;
   while (size > 0)
   {
-    int read = m_file.Read(buf,size);
+    const ssize_t read = m_file.Read(buf, size);
+    if (read <= 0)
+      return false;
     size -= read;
     buf += read;
   }
+  return true;
 }
 
 int CShoutcastFile::IoControl(EIoControl control, void* payload)
 {
+  if (control == IOCTRL_ABORT_READ)
+    return m_file.IoControl(control, payload);
+
   if (control == IOCTRL_SET_CACHE && m_cacheReader == nullptr)
   {
     std::unique_lock<CCriticalSection> lock(m_tagSection);

@@ -52,7 +52,7 @@ public:
   void Process() override;
 protected:
   bool ExtractTagInfo(const char* buf);
-  void ReadTruncated(char* buf2, int size);
+  bool ReadTruncated(char* buf2, int size);
 
 private:
   std::string DecodeToUTF8(const std::string& str);

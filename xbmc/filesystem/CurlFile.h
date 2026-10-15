@@ -9,6 +9,7 @@
 #pragma once
 
 #include "IFile.h"
+#include "threads/CriticalSection.h"
 #include "utils/HttpHeader.h"
 #include "utils/RingBuffer.h"
 
@@ -95,12 +96,19 @@ namespace XFILE
       /* load CA certs file into memory for later use */
       static void PreloadCaCertsBlob();
 
+      struct ReadAbort
+      {
+        std::atomic<bool> requested{false};
+        CCriticalSection lock;
+        CURLM* polling{nullptr}; // Guarded by lock; cleared before handle release.
+      };
+
       class CReadState
       {
       public:
-          explicit CReadState(const std::atomic<bool>& abortRead);
+          explicit CReadState(ReadAbort& readAbort);
           ~CReadState();
-          const std::atomic<bool>& m_abortRead;
+          ReadAbort& m_readAbort;
           CURL_HANDLE* m_easyHandle;
           CURLM* m_multiHandle;
 
@@ -152,7 +160,7 @@ namespace XFILE
       std::string GetInfoString(int infoType);
 
     protected:
-      std::atomic<bool> m_abortRead{false};
+      ReadAbort m_readAbort;
       CReadState* m_state;
       CReadState* m_oldState;
       unsigned int m_bufferSize;

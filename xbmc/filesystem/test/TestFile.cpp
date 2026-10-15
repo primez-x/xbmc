@@ -7,6 +7,9 @@
  */
 
 #include "filesystem/File.h"
+
+#include "URL.h"
+#include "filesystem/ShoutcastFile.h"
 #include "test/TestUtils.h"
 
 #include <errno.h>
@@ -23,6 +26,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <thread>
 #endif
@@ -230,7 +234,12 @@ namespace
 class CPausedHttpSource
 {
 public:
-  explicit CPausedHttpSource(std::chrono::milliseconds pause) : m_pause(pause) {}
+  explicit CPausedHttpSource(std::chrono::milliseconds pause,
+                             int metadataInterval = 0,
+                             std::string metadataPrefix = {})
+    : m_pause(pause), m_metadataInterval(metadataInterval), m_metadataPrefix(metadataPrefix)
+  {
+  }
 
   ~CPausedHttpSource()
   {
@@ -323,8 +332,13 @@ private:
       request.append(buffer, count);
     }
 
-    if (Send(client, "HTTP/1.1 200 OK\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n") &&
-        Send(client, std::string(4096, 'a')))
+    const std::string metadataHeader = m_metadataInterval > 0
+                                           ? "icy-metaint: " + std::to_string(m_metadataInterval) + "\r\n"
+                                           : "";
+    if (Send(client, "HTTP/1.1 200 OK\r\nContent-Length: " +
+                         std::to_string(8192 + m_metadataPrefix.size()) + "\r\n" + metadataHeader +
+                         "Connection: close\r\n\r\n") &&
+        Send(client, std::string(4096, 'a') + m_metadataPrefix))
     {
       {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -341,6 +355,8 @@ private:
   }
 
   const std::chrono::milliseconds m_pause;
+  const int m_metadataInterval;
+  const std::string m_metadataPrefix;
   int m_listener = -1;
   uint16_t m_port = 0;
   std::thread m_thread;
@@ -350,7 +366,47 @@ private:
   bool m_startPause = false;
   bool m_paused = false;
 };
+void CheckShoutcastAbort(int metadataInterval, const std::string& metadataPrefix)
+{
+  CPausedHttpSource source(std::chrono::seconds(4), metadataInterval, metadataPrefix);
+  ASSERT_TRUE(source.Start());
+  XFILE::CShoutcastFile file;
+  ASSERT_TRUE(file.Open(CURL(source.URL())));
+  ASSERT_TRUE(source.WaitForPause());
+  char audio[4096];
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(audio)), file.Read(audio, sizeof(audio)));
+  EXPECT_EQ(std::string(sizeof(audio), 'a'), std::string(audio, sizeof(audio)));
+  auto read = std::async(std::launch::async, [&file] {
+    char next;
+    return file.Read(&next, 1);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(0, file.IoControl(XFILE::IOCTRL_ABORT_READ, nullptr));
+  EXPECT_EQ(0, file.IoControl(XFILE::IOCTRL_ABORT_READ, nullptr));
+  EXPECT_EQ(std::future_status::ready, read.wait_for(std::chrono::milliseconds(100)));
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(100));
+  EXPECT_TRUE(source.IsPaused());
+  EXPECT_EQ(0, read.get());
+  file.Close();
+  file.Close();
+}
 } // namespace
+
+TEST(TestFile, AbortShoutcastAudio)
+{
+  CheckShoutcastAbort(8192, "");
+}
+
+TEST(TestFile, AbortShoutcastMetadataHeader)
+{
+  CheckShoutcastAbort(4096, "");
+}
+
+TEST(TestFile, AbortShoutcastPartialMetadata)
+{
+  CheckShoutcastAbort(4096, std::string(1, '\1') + "StreamTi");
+}
 
 TEST(TestFile, CloseCachedPausedHttpSource)
 {
@@ -370,7 +426,9 @@ TEST(TestFile, CloseCachedPausedHttpSource)
   file.Close();
   const auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_TRUE(source.IsPaused());
-  EXPECT_LT(elapsed, std::chrono::seconds(3));
+  EXPECT_LT(elapsed, std::chrono::milliseconds(100));
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+  EXPECT_TRUE(source.IsPaused());
 }
 
 TEST(TestFile, ReadCachedPausedHttpSource)
