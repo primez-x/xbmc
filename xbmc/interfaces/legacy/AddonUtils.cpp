@@ -9,12 +9,16 @@
 #include "AddonUtils.h"
 
 #include "LanguageHook.h"
+#include "ServiceBroker.h"
 #include "addons/Skin.h"
 #include "application/Application.h"
+#include "messaging/ApplicationMessenger.h"
 #include "utils/XBMCTinyXML.h"
 #ifdef ENABLE_XBMC_TRACE_API
 #include "utils/log.h"
 #endif
+
+#include <exception>
 
 namespace XBMCAddonUtils
 {
@@ -37,6 +41,43 @@ namespace XBMCAddonUtils
 
     if (m_languageHook)
       m_languageHook->DelayedCallClose();
+  }
+
+  bool RunOnApplicationThread(const std::function<void()>& function)
+  {
+    struct CallData
+    {
+      const std::function<void()>& function;
+      std::exception_ptr exception;
+      bool executed;
+    } data{function, nullptr, false};
+
+    KODI::MESSAGING::ThreadMessageCallback callback{
+        [](void* userptr)
+        {
+          auto& data = *static_cast<CallData*>(userptr);
+          data.executed = true;
+          try
+          {
+            data.function();
+          }
+          catch (...)
+          {
+            data.exception = std::current_exception();
+          }
+        },
+        &data};
+
+    {
+      XBMCAddon::DelayedCallGuard guard;
+      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_CALLBACK, -1, -1, &callback);
+    }
+
+    if (data.exception)
+      std::rethrow_exception(data.exception);
+
+    // TMSG_CALLBACK leaves the messenger result at -1, even after execution.
+    return data.executed;
   }
 
   static char defaultImage[1024];

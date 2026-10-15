@@ -140,6 +140,8 @@ int CApplicationMessenger::SendMsg(ThreadMessage&& message, bool wait)
       CSingleExit exit(winSystem->GetGfxContext());
       waitEvent->Wait();
     }
+    else
+      waitEvent->Wait();
     return *result;
   }
 

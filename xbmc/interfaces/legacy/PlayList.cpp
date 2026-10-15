@@ -8,6 +8,7 @@
 
 #include "PlayList.h"
 
+#include "AddonUtils.h"
 #include "PlayListPlayer.h"
 #include "ServiceBroker.h"
 #include "playlists/PlayListFactory.h"
@@ -34,25 +35,27 @@ namespace XBMCAddon
 
     void PlayList::add(const String& url, XBMCAddon::xbmcgui::ListItem* listitem, int index)
     {
-      CFileItemList items;
-
-      if (listitem != NULL)
+      XBMCAddonUtils::RunOnApplicationThread([&]
       {
-        // an optional listitem was passed
-        // set m_strPath to the passed url
-        listitem->item->SetPath(url);
+        CFileItemList items;
 
-        items.Add(listitem->item);
-      }
-      else
-      {
-        CFileItemPtr item(new CFileItem(url, false));
-        item->SetLabel(url);
+        if (listitem != NULL)
+        {
+          // The optional ListItem may already belong to the playlist.
+          listitem->item->SetPath(url);
 
-        items.Add(item);
-      }
+          items.Add(listitem->item);
+        }
+        else
+        {
+          CFileItemPtr item(new CFileItem(url, false));
+          item->SetLabel(url);
 
-      pPlayList->Insert(items, index);
+          items.Add(item);
+        }
+
+        pPlayList->Insert(items, index);
+      });
     }
 
     bool PlayList::load(const char* cFileName)
@@ -69,23 +72,24 @@ namespace XBMCAddon
         std::unique_ptr<PLAYLIST::CPlayList> pPlayList(PLAYLIST::CPlayListFactory::Create(item));
         if (nullptr != pPlayList)
         {
-          // load it
+          // Parse the file on the caller thread.
           if (!pPlayList->Load(item.GetPath()))
             //hmmm unable to load playlist?
             return false;
 
-          // clear current playlist
-          CServiceBroker::GetPlaylistPlayer().ClearPlaylist(this->iPlayList);
-
-          // add each item of the playlist to the playlistplayer
-          for (int i=0; i < pPlayList->size(); ++i)
+          return XBMCAddonUtils::RunOnApplicationThread([&]
           {
-            CFileItemPtr playListItem =(*pPlayList)[i];
-            if (playListItem->GetLabel().empty())
-              playListItem->SetLabel(URIUtils::GetFileName(playListItem->GetPath()));
+            CServiceBroker::GetPlaylistPlayer().ClearPlaylist(this->iPlayList);
 
-            this->pPlayList->Add(playListItem);
-          }
+            for (int i = 0; i < pPlayList->size(); ++i)
+            {
+              CFileItemPtr playListItem = (*pPlayList)[i];
+              if (playListItem->GetLabel().empty())
+                playListItem->SetLabel(URIUtils::GetFileName(playListItem->GetPath()));
+
+              this->pPlayList->Add(playListItem);
+            }
+          });
         }
       }
       else
@@ -97,45 +101,60 @@ namespace XBMCAddon
 
     void PlayList::remove(const char* filename)
     {
-      pPlayList->Remove(filename);
+      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Remove(filename); });
     }
 
     void PlayList::clear()
     {
-      pPlayList->Clear();
+      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Clear(); });
     }
 
     int PlayList::size()
     {
-      return pPlayList->size();
+      int result = 0;
+      XBMCAddonUtils::RunOnApplicationThread([&] { result = pPlayList->size(); });
+      return result;
     }
 
     void PlayList::shuffle()
     {
-      pPlayList->Shuffle();
+      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->Shuffle(); });
     }
 
     void PlayList::unshuffle()
     {
-      pPlayList->UnShuffle();
+      XBMCAddonUtils::RunOnApplicationThread([&] { pPlayList->UnShuffle(); });
     }
 
     int PlayList::getposition()
     {
-      return CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx();
+      int result = -1;
+      XBMCAddonUtils::RunOnApplicationThread(
+          [&] { result = CServiceBroker::GetPlaylistPlayer().GetCurrentItemIdx(); });
+      return result;
     }
 
     XBMCAddon::xbmcgui::ListItem* PlayList::operator [](long i)
     {
-      int iPlayListSize = size();
+      CFileItemPtr ptr;
+      bool validIndex = false;
+      XBMCAddonUtils::RunOnApplicationThread([&]
+      {
+        const int iPlayListSize = pPlayList->size();
 
-      long pos = i;
-      if (pos < 0) pos += iPlayListSize;
+        long pos = i;
+        if (pos < 0)
+          pos += iPlayListSize;
 
-      if (pos < 0 || pos >= iPlayListSize)
+        if (pos < 0 || pos >= iPlayListSize)
+          return;
+
+        ptr = (*pPlayList)[pos];
+        validIndex = true;
+      });
+
+      if (!validIndex)
         throw PlayListException("array out of bound");
-
-      CFileItemPtr ptr((*pPlayList)[pos]);
 
       return new XBMCAddon::xbmcgui::ListItem(ptr);
     }

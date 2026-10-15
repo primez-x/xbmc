@@ -19,6 +19,7 @@
 
 #include "threads/CriticalSection.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -49,6 +50,10 @@ namespace XBMCAddonUtils
     XBMCAddon::LanguageHook* m_languageHook = nullptr;
     bool m_offScreen = false;
   };
+
+  // Release the language lock while the application thread runs the callback.
+  // Return false when the messenger stops or discards the callback.
+  bool RunOnApplicationThread(const std::function<void()>& function);
 
   class InvertSingleLockGuard
   {

@@ -292,34 +292,37 @@ namespace XBMCAddon
     String getInfoLabel(const char* cLine)
     {
       XBMC_TRACE;
+      String result;
       if (!cLine)
-      {
-        String ret;
-        return ret;
-      }
+        return result;
 
-      CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
-      int ret = infoMgr.TranslateString(cLine);
-      //doesn't seem to be a single InfoTag?
-      //try full blown GuiInfoLabel then
-      if (ret == 0)
-        return GUILIB::GUIINFO::CGUIInfoLabel::GetLabel(cLine, INFO::DEFAULT_CONTEXT);
-      else
-        return infoMgr.GetLabel(ret, INFO::DEFAULT_CONTEXT);
+      XBMCAddonUtils::RunOnApplicationThread([&]
+      {
+        CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
+        int ret = infoMgr.TranslateString(cLine);
+        // Resolve formatted labels when no single InfoTag matches.
+        if (ret == 0)
+          result = GUILIB::GUIINFO::CGUIInfoLabel::GetLabel(cLine, INFO::DEFAULT_CONTEXT);
+        else
+          result = infoMgr.GetLabel(ret, INFO::DEFAULT_CONTEXT);
+      });
+      return result;
     }
 
     String getInfoImage(const char * infotag)
     {
       XBMC_TRACE;
+      String result;
       if (!infotag)
-        {
-          String ret;
-          return ret;
-        }
+        return result;
 
-      CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
-      int ret = infoMgr.TranslateString(infotag);
-      return infoMgr.GetImage(ret, WINDOW_INVALID);
+      XBMCAddonUtils::RunOnApplicationThread([&]
+      {
+        CGUIInfoManager& infoMgr = CServiceBroker::GetGUI()->GetInfoManager();
+        int ret = infoMgr.TranslateString(infotag);
+        result = infoMgr.GetImage(ret, WINDOW_INVALID);
+      });
+      return result;
     }
 
     void playSFX(const char* filename, bool useCached)
