@@ -58,11 +58,12 @@ public:
   // A stop cancels the opens that began before the stop and did not reach the
   // player yet.
   void CancelOpens() { m_opensCancelledAt = ++m_intentSequence; }
-  // A stop or a newer open supersedes every older open still in progress,
-  // whatever started the older open. One request owns one intent.
+  // A stop, or a newer open that reached OpenFile, supersedes every older open
+  // still in progress, whatever started the older open. A newer open that fails
+  // before OpenFile does not. One request owns one intent.
   bool OpenSuperseded(uint64_t intent) const
   {
-    return intent < m_opensCancelledAt || intent < m_lastBegunIntent;
+    return intent < m_opensCancelledAt || intent < m_lastAcceptedIntent;
   }
   // The player plays the video item of the last open. The player can report the
   // video stream later.
@@ -81,7 +82,8 @@ public:
   bool HasPlayer() const;
   bool OpenFile(const CFileItem& item, const CPlayerOptions& options,
                 const CPlayerCoreFactory &factory,
-                const std::string &playerName, IPlayerCallback& callback);
+                const std::string &playerName, IPlayerCallback& callback,
+                uint64_t intent);
   void OpenNext(const CPlayerCoreFactory &factory);
   // Main-thread observations of the accepted deferred replacement.
   bool HasPendingOpen() const;
@@ -263,7 +265,7 @@ private:
   uint64_t m_supersededAt{0};
   uint64_t m_intentSequence{0};
   uint64_t m_opensCancelledAt{0};
-  uint64_t m_lastBegunIntent{0};
+  uint64_t m_lastAcceptedIntent{0};
   std::vector<uint64_t> m_openIntents;
   bool m_openedVideo{false};
   uint64_t m_openGeneration{0};
@@ -286,5 +288,6 @@ private:
     CPlayerOptions options = {};
     std::string playerName;
     IPlayerCallback *callback = nullptr;
+    uint64_t intent = 0;
   } m_nextItem;
 };

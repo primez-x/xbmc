@@ -2868,6 +2868,11 @@ bool CApplication::StartPlayback(CFileItem item,
     }
   }
 
+  // A stop or a newer open during the menu supersedes the open, before the open
+  // discards the notifications of the current playback
+  if (appPlayer->OpenSuperseded(intent))
+    return false;
+
   // this really aught to be inside !bRestart, but since PlayStack
   // uses that to init playback, we have to keep it outside
   const PLAYLIST::Id playlistId = CServiceBroker::GetPlaylistPlayer().GetCurrentPlaylist();
@@ -2992,7 +2997,8 @@ bool CApplication::StartPlayback(CFileItem item,
 
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
-  appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this);
+  appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this,
+                     intent);
   // A backend that processes messages during the open (UPnP) can run a stop or
   // a newer open, which owns the playlist.
   if (appPlayer->OpenSuperseded(intent))

@@ -155,10 +155,13 @@ std::string CApplicationPlayer::GetCurrentPlayer() const
 
 bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& options,
                                   const CPlayerCoreFactory &factory,
-                                  const std::string &playerName, IPlayerCallback& callback)
+                                  const std::string &playerName, IPlayerCallback& callback,
+                                  uint64_t intent)
 {
   if (m_shutdown)
     return false;
+  // A queued open keeps the intent of the request; a later open is newer.
+  m_lastAcceptedIntent = std::max(m_lastAcceptedIntent, intent);
   // Every new intent, including a failed or deferred open, supersedes terminal
   // cleanup of the previous player. Main still owns its close continuation.
   ++m_openGeneration;
@@ -177,6 +180,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
     m_nextItem.options = options;
     m_nextItem.playerName = newPlayer;
     m_nextItem.callback = &callback;
+    m_nextItem.intent = intent;
     ResetPlayer();
     return true; // Accepted for the normal main-frame continuation.
   }
@@ -189,11 +193,10 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
       return false;
   }
 
-  const auto generation = m_openGeneration;
   bool ret = player->OpenFile(item, options);
-  // A backend that processes messages during the open (UPnP) can run a newer
-  // open. That open retired or reused the player and owns the state.
-  if (generation != m_openGeneration)
+  // A backend that processes messages during the open (UPnP) can run a stop,
+  // which retired the player, or a newer open, which owns the state.
+  if (OpenSuperseded(intent))
     return false;
   m_waitForPlaybackStop = ret;
   m_openedVideo = ret && item.IsVideo();
@@ -212,9 +215,8 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
 uint64_t CApplicationPlayer::BeginOpen()
 {
-  m_lastBegunIntent = ++m_intentSequence;
-  m_openIntents.push_back(m_lastBegunIntent);
-  return m_lastBegunIntent;
+  m_openIntents.push_back(++m_intentSequence);
+  return m_intentSequence;
 }
 
 void CApplicationPlayer::EndOpen(uint64_t intent)
@@ -266,7 +268,7 @@ void CApplicationPlayer::OpenNext(const CPlayerCoreFactory &factory)
   // Move the full payload before OpenFile can replace it or reset the queue.
   auto next = std::move(m_nextItem);
   m_nextItem = {};
-  OpenFile(*next.pItem, next.options, factory, next.playerName, *next.callback);
+  OpenFile(*next.pItem, next.options, factory, next.playerName, *next.callback, next.intent);
 }
 
 bool CApplicationPlayer::HasPlayer() const

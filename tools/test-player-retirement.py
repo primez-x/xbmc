@@ -50,7 +50,7 @@ struct CApplicationPlayer {
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
   bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
   enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
-  uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0,m_lastBegunIntent=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
+  uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0,m_lastAcceptedIntent=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
   uint64_t BeginOpen();void EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
 @INLINE_INTENTS@
   bool IsPlayingOpenedVideo()const;uint64_t GetOpenGeneration()const{return m_openGeneration;}
@@ -58,7 +58,7 @@ struct CApplicationPlayer {
   uint64_t m_openGeneration=0;std::optional<uint64_t> m_cleanupGeneration;bool m_cleanupPending=false;
   struct {
     std::shared_ptr<CFileItem> pItem;CPlayerOptions options;
-    std::string playerName;IPlayerCallback* callback=nullptr;
+    std::string playerName;IPlayerCallback* callback=nullptr;uint64_t intent=0;
   }m_nextItem;
   Timer m_audioStreamUpdate,m_videoStreamUpdate,m_subtitleStreamUpdate;
   int created=0;
@@ -67,7 +67,10 @@ struct CApplicationPlayer {
   bool ClosePlayer(bool=false,std::shared_ptr<CEvent> = {});void ResetPlayer(std::shared_ptr<CEvent> = {});void ContinueClose();void OnPlaybackStopped();void CompleteCloseCompletions();
   void OpenNext(const CPlayerCoreFactory&);
   bool OpenFile(const CFileItem&,const CPlayerOptions&,const CPlayerCoreFactory&,
-                const std::string&,IPlayerCallback&);
+                const std::string&,IPlayerCallback&,uint64_t intent);
+  // A direct call in a test is a new request.
+  bool OpenFile(const CFileItem& f,const CPlayerOptions& o,const CPlayerCoreFactory& fa,
+                const std::string& n,IPlayerCallback& c){return OpenFile(f,o,fa,n,c,++m_intentSequence);}
   void CreatePlayer(const CPlayerCoreFactory&,const std::string& name,IPlayerCallback&) {
     assert(!m_pPlayer);++created;m_pPlayer=std::make_shared<IPlayer>();
     m_pPlayer->m_name=name;m_pPlayer->applicationLock=&m_playerLock;
