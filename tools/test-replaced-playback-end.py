@@ -327,6 +327,15 @@ int main(){
   assert(playlist.selected==-1&&playlist.GetCurrentPlaylist()==TYPE_NONE&&CServiceBroker::pvr.ended==0);
   assert(!gfx.fullscreen&&gfx.restores==1);
  }
+ // The end of a playlist that was queued before an open, for example Next past
+ // the last item, stops the old player but does not cancel the newer open.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;
+  app.nested=[&]{app.PlaylistStopped();assert(app.player.m_closingPlayer);};
+  CFileItem next;next.id=60;assert(app.PlayFile(next,"old",false,false));
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==60);
+  app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==60&&gfx.fullscreen);
+ }
  // A stop without playback during a resolution cancels the open too. A stop
  // before an open does not cancel the open.
  {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;app.StopPlaying();
@@ -457,7 +466,7 @@ def main():
     code = code.replace('@CONTINUATION@', frame[frame.index('  const bool openingVideo ='):
                                                  frame.index('  // this will go away')])
     code = code.replace('@CLEANUP@', function(application, 'void CApplication::PlaybackCleanup()'))
-    code = code.replace('@STOP@', function(application, 'void CApplication::StopPlaying('))
+    code = code.replace('@STOP@', function(application, 'void CApplication::StopPlaying(') + '\n' + function(application, 'void CApplication::StopPlayer('))
     stop = function(playlist, '  case TMSG_MEDIA_STOP:')
     code = code.replace('@MEDIASTOP@', stop[stop.index('{') + 1:-1])
     stop = application[application.index('  case GUI_MSG_PLAYLISTPLAYER_STOPPED:'):

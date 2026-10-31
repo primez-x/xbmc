@@ -3106,20 +3106,27 @@ bool CApplication::IsFullScreen()
 
 void CApplication::StopPlaying(std::shared_ptr<CEvent> completion)
 {
+  StopPlayer(std::move(completion), true);
+}
+
+void CApplication::StopPlayer(std::shared_ptr<CEvent> completion, bool cancelOpens)
+{
   CGUIComponent *gui = CServiceBroker::GetGUI();
 
   if (gui)
   {
     int iWin = gui->GetWindowManager().GetActiveWindow();
     const auto appPlayer = GetComponent<CApplicationPlayer>();
-    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
+    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() ||
+        (cancelOpens && appPlayer->IsOpening()))
     {
       appPlayer->ClosePlayer(false, std::move(completion));
-      appPlayer->CancelOpens();
+      if (cancelOpens)
+        appPlayer->CancelOpens();
       // Without an end or stop notification to come, for example after the stop
       // of a queued playlist item, no notification ends the playlist. A playlist
       // item that the stop cancels does not continue the playlist.
-      if (!appPlayer->StopRequested() || appPlayer->IsOpening())
+      if (!appPlayer->StopRequested() || (cancelOpens && appPlayer->IsOpening()))
         CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
 
       // turn off visualisation window when stopping
@@ -3436,9 +3443,10 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
   case GUI_MSG_PLAYLISTPLAYER_STOPPED:
     ResetCurrentItem();
+    // The end of the playlist can arrive during a newer open, which continues
     if (GetComponent<CApplicationPlayer>()->HasPlayer() ||
         GetComponent<CApplicationPlayer>()->HasPendingOpen())
-      StopPlaying();
+      StopPlayer({}, false);
     PlaybackCleanup();
     return true;
 

@@ -258,6 +258,9 @@ protected:
 
   std::unique_ptr<MUSIC_INFO::CMusicInfoScanner> m_musicInfoScanner;
 
+  // A stop request also cancels the opens that began before the request. The
+  // end of a playlist stops the player only.
+  void StopPlayer(std::shared_ptr<CEvent> completion, bool cancelOpens);
   bool StartMedia(CFileItem& item,
                   const std::string& player,
                   PLAYLIST::Id playlistId,
