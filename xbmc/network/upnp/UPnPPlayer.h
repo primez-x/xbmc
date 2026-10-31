@@ -54,11 +54,12 @@ public:
 
   int PlayFile(const CFileItem& file,
                const CPlayerOptions& options,
-               XbmcThreads::EndTime<>& timeout);
+               XbmcThreads::EndTime<>& timeout,
+               uint64_t open);
 
 private:
   bool IsPaused() const;
-  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout);
+  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -73,7 +74,8 @@ private:
   std::string m_current_meta;
   bool m_started = false;
   std::atomic<bool> m_stopremote{false};
-  std::atomic<bool> m_closed{false};
+  // The current open; a newer open and a close advance the sequence
+  std::atomic<uint64_t> m_openSequence{0};
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;

@@ -199,15 +199,16 @@ CUPnPPlayer::~CUPnPPlayer()
   CUPnP::UnregisterUserdata(m_delegate.get());
 }
 
-int CUPnPPlayer::WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout)
+int CUPnPPlayer::WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open)
 {
   if (!event.Wait(0ms) && !CGUIDialogBusy::WaitOnEvent(event))
     return NPT_FAILURE;
 
-  // The busy dialog processes messages: CloseFile can run during the wait
-  if (m_closed)
+  // The busy dialog processes messages: CloseFile or a newer open of this player
+  // can run during the wait
+  if (open != m_openSequence)
   {
-    m_logger->debug("player closed while waiting for the renderer");
+    m_logger->debug("player closed or reopened while waiting for the renderer");
     return NPT_FAILURE;
   }
 
@@ -216,7 +217,8 @@ int CUPnPPlayer::WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout)
 
 int CUPnPPlayer::PlayFile(const CFileItem& file,
                           const CPlayerOptions& options,
-                          XbmcThreads::EndTime<>& timeout)
+                          XbmcThreads::EndTime<>& timeout,
+                          uint64_t open)
 {
   CFileItem item(file);
   NPT_Reference<CThumbLoader> thumb_loader;
@@ -269,7 +271,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
   NPT_CHECK_LABEL_SEVERE(
       m_control->GetTransportInfo(m_delegate->m_device, m_delegate->m_instance, m_delegate.get()),
       failed_gettransportinfo);
-  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout), failed_gettransportinfo);
+  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout, open), failed_gettransportinfo);
 
   if (m_delegate->m_trainfo.cur_transport_state != "NO_MEDIA_PRESENT" &&
       m_delegate->m_trainfo.cur_transport_state != "STOPPED")
@@ -279,7 +281,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
     NPT_CHECK_LABEL_SEVERE(
         m_control->Stop(m_delegate->m_device, m_delegate->m_instance, m_delegate.get()),
         failed_stop);
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout), failed_stop);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout, open), failed_stop);
     NPT_CHECK_LABEL_SEVERE(m_delegate->m_resstatus, failed_stop);
   }
 
@@ -289,7 +291,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
                                                       obj->m_Resources[res_index].m_Uri,
                                                       (const char*)tmp, m_delegate.get()),
                          failed_setavtransporturi);
-  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout), failed_setavtransporturi);
+  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout, open), failed_setavtransporturi);
   NPT_CHECK_LABEL_SEVERE(m_delegate->m_resstatus, failed_setavtransporturi);
 
   timeout.Set(timeout.GetInitialTimeoutValue());
@@ -299,7 +301,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
       failed_play);
   // the renderer plays for this player now, CloseFile must stop the renderer
   m_stopremote = true;
-  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout), failed_play);
+  NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_resevent, timeout, open), failed_play);
   NPT_CHECK_LABEL_SEVERE(m_delegate->m_resstatus, failed_play);
 
   /* wait for PLAYING state */
@@ -323,7 +325,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
       return NPT_FAILURE;
     }
 
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout), failed_waitplaying);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout, open), failed_waitplaying);
 
   } while (!timeout.IsTimePast());
 
@@ -369,7 +371,7 @@ failed:
 bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
 {
   XbmcThreads::EndTime<> timeout(10s);
-  m_closed = false;
+  const uint64_t open = ++m_openSequence;
 
   /* if no path we want to attach to a already playing player */
   if (file.GetPath() == "")
@@ -379,7 +381,7 @@ bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
         m_control->GetTransportInfo(m_delegate->m_device, m_delegate->m_instance, m_delegate.get()),
         failed);
 
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout), failed);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(m_delegate->m_traevnt, timeout, open), failed);
 
     /* make sure the attached player is actually playing */
     const NPT_String transportState = m_delegate->GetTransportState();
@@ -389,10 +391,10 @@ bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
     }
   }
   else
-    NPT_CHECK_LABEL_SEVERE(PlayFile(file, options, timeout), failed);
+    NPT_CHECK_LABEL_SEVERE(PlayFile(file, options, timeout, open), failed);
 
   // CloseFile can run on another thread after the last wait
-  if (m_closed)
+  if (open != m_openSequence)
     goto failed;
 
   if (!IsRunning())
@@ -466,10 +468,11 @@ failed:
 bool CUPnPPlayer::CloseFile(bool reopen)
 {
   // stops an OpenFile that waits for the renderer
-  m_closed = true;
+  ++m_openSequence;
   NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);
-  // stop the renderer once, a newer player can use the renderer after the first close
-  if (m_stopremote.exchange(false))
+  // stop the renderer once, a newer player can use the renderer after the stop.
+  // After a failed stop the renderer still plays for this player.
+  if (m_stopremote)
   {
     m_delegate->m_resevent.Reset();
     NPT_CHECK_LABEL(m_control->Stop(m_delegate->m_device, m_delegate->m_instance, m_delegate.get()),
@@ -477,6 +480,7 @@ bool CUPnPPlayer::CloseFile(bool reopen)
     if (!m_delegate->m_resevent.Wait(10000ms))
       goto failed;
     NPT_CHECK_LABEL(m_delegate->m_resstatus, failed);
+    m_stopremote = false;
   }
 
   if (m_started)

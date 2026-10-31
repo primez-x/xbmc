@@ -95,10 +95,10 @@ struct CUPnP {
   static void* GetServer() { return nullptr; }
   static void UnregisterUserdata(void*);
 };
-template<class... A> NPT_Reference<PLT_MediaObject> BuildObject(A&&...) {
+template<class F, class... A> NPT_Reference<PLT_MediaObject> BuildObject(F& file, A&&...) {
   auto* obj = new PLT_MediaObject();
   obj->m_Resources.v.resize(1);
-  obj->m_Resources.v[0].m_Uri = "http://server/item";
+  obj->m_Resources.v[0].m_Uri = file.GetPath().c_str();
   return NPT_Reference<PLT_MediaObject>(obj);
 }
 
@@ -214,6 +214,8 @@ public:
   // The first GetTransportInfo after a stop reports firstState, later ones PLAYING.
   std::string firstState = "STOPPED";
   int infoCalls = 0;
+  int stopRejects = 0;  // the next Stop commands that the renderer rejects
+  std::string uri;      // the URI of the last SetAVTransportURI
 };
 
 NPT_Result PLT_MediaController::Send(PLT_MediaControllerDelegate* d, const char* cmd,
@@ -241,14 +243,21 @@ NPT_Result PLT_MediaController::GetTransportInfo(PLT_DeviceDataReference&, NPT_U
 NPT_Result PLT_MediaController::Stop(PLT_DeviceDataReference&, NPT_UInt32,
                                      PLT_MediaControllerDelegate* d) {
   return Send(d, "Stop", [](CUPnPPlayerController& p) {
+    if (p.stopRejects > 0) {
+      --p.stopRejects;
+      p.m_resstatus = NPT_FAILURE;
+      p.m_resevent.Set();
+      return;
+    }
     p.infoCalls = 0;
     p.m_resstatus = NPT_SUCCESS;
     p.m_resevent.Set();
   });
 }
 NPT_Result PLT_MediaController::SetAVTransportURI(PLT_DeviceDataReference&, NPT_UInt32,
-                                                  const NPT_String&, const NPT_String&,
+                                                  const NPT_String& uri, const NPT_String&,
                                                   PLT_MediaControllerDelegate* d) {
+  static_cast<CUPnPPlayerController*>(d)->uri = uri;
   return Send(d, "SetAVTransportURI", [](CUPnPPlayerController& p) {
     p.m_resstatus = NPT_SUCCESS;
     p.m_resevent.Set();
@@ -274,7 +283,8 @@ public:
   ~CUPnPPlayer();
   bool OpenFile(const CFileItem& file, const CPlayerOptions& options);
   bool CloseFile(bool reopen = false);
-  int PlayFile(const CFileItem& file, const CPlayerOptions& options, XbmcThreads::EndTime<>& timeout);
+  int PlayFile(const CFileItem& file, const CPlayerOptions& options, XbmcThreads::EndTime<>& timeout,
+               uint64_t open);
 @WAITDECL@
   bool IsRunning() const { return running; }
   void Create() { ++creates; running = true; }
@@ -285,7 +295,7 @@ public:
   IPlayerCallback& m_callback;
   bool m_started = false;
   @STOPTYPE@ m_stopremote{false};
-  std::atomic<bool> m_closed{false};
+  std::atomic<uint64_t> m_openSequence{0};
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;
@@ -485,6 +495,63 @@ void newer_player_on_same_renderer() {
   }
 }
 
+// The application reuses a playing remote player for a newer open. A newer open
+// that starts inside a wait of an older open on the same player owns the renderer.
+void newer_open_on_same_player() {
+  for (int n = 1; n <= 4; ++n) {
+    Begin("newer open on the same player inside wait " + std::to_string(n));
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
+    g_ctl.log.clear();
+    g_waits = 0;
+    g_waitHook = [&](int w) {
+      if (w != n)
+        return;
+      g_waitHook = nullptr;
+      CHECK(p.OpenFile(Item("http://server/newer.mkv"), CPlayerOptions()));
+    };
+    CHECK(!p.OpenFile(Item("http://server/older.mkv"), CPlayerOptions()));
+    // the older open sends no command after the newer open
+    CHECK(p.m_delegate->uri == "http://server/newer.mkv");
+    CHECK(g_ctl.log.back() == "P:GetMediaInfo");
+    CHECK(cb.started == 2 && cb.avstarted == 2 && cb.stopped == 0);
+    CHECK(p.CloseFile());
+    CHECK(Count("P:Stop") >= 1 && g_ctl.log.back() == "P:Stop");
+  }
+}
+
+// A rejected Stop leaves the renderer playing for this player: the next close
+// stops the renderer again.
+void rejected_stop() {
+  Begin("rejected stop after an open");
+  IPlayerCallback cb;
+  {
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    p.m_delegate->stopRejects = 1;
+    CHECK(!p.CloseFile());
+    CHECK(p.CloseFile());
+    CHECK(p.CloseFile());
+  }
+  CHECK(Count("P:Stop") == 2);
+
+  Begin("rejected stop during an open");
+  {
+    CUPnPPlayer p(cb, "P");
+    g_waitHook = [&](int w) {
+      if (w != 3)  // the wait for the answer to Play
+        return;
+      g_waitHook = nullptr;
+      p.m_delegate->stopRejects = 1;
+      CHECK(!p.CloseFile());
+    };
+    CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(p.CloseFile());
+  }
+  CHECK(Count("P:Stop") == 2);
+}
+
 void close_during_last_command() {
   Begin("close while the last command is sent");
   IPlayerCallback cb;
@@ -551,6 +618,8 @@ int main(int argc, char** argv) {
       {"close_inside_wait", close_inside_wait},
       {"close_inside_wait_renderer_playing", close_inside_wait_renderer_playing},
       {"newer_player_on_same_renderer", newer_player_on_same_renderer},
+      {"newer_open_on_same_player", newer_open_on_same_player},
+      {"rejected_stop", rejected_stop},
       {"close_during_last_command", close_during_last_command},
       {"attach", attach}};
   if (argc > 1) {
@@ -570,18 +639,20 @@ int main(int argc, char** argv) {
 # Each control removes one new check from the production text. A rig that still
 # passes would not prove the check.
 CONTROLS = [
-    ('wait does not check the closed state',
-     'if (m_closed)\n  {\n    m_logger->debug', 'if (false)\n  {\n    m_logger->debug'),
+    ('wait does not check the open sequence',
+     'if (open != m_openSequence)\n  {\n    m_logger->debug', 'if (false)\n  {\n    m_logger->debug'),
     ('Play does not mark the renderer as started',
      '  m_stopremote = true;\n  NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '  NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
-    ('OpenFile does not reset the closed state',
-     'timeout(10s);\n  m_closed = false;', 'timeout(10s);'),
-    ('OpenFile does not check the closed state before starting',
-     'if (m_closed)\n    goto failed;', 'if (false)\n    goto failed;'),
-    ('CloseFile does not set the closed state',
-     '  m_closed = true;\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
+    ('OpenFile does not start a new open',
+     'const uint64_t open = ++m_openSequence;', 'const uint64_t open = m_openSequence;'),
+    ('OpenFile does not check the open sequence before starting',
+     'if (open != m_openSequence)\n    goto failed;', 'if (false)\n    goto failed;'),
+    ('CloseFile does not end the open',
+     '  ++m_openSequence;\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
     ('CloseFile can stop the renderer twice',
-     'if (m_stopremote.exchange(false))', 'if (m_stopremote)'),
+     '    m_stopremote = false;\n  }', '  }'),
+    ('CloseFile drops the renderer before the stop succeeds',
+     'if (m_stopremote)\n  {\n    m_delegate', 'if (m_stopremote.exchange(false))\n  {\n    m_delegate'),
 ]
 
 
@@ -593,7 +664,7 @@ def production():
                   'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()']
     body = '\n'.join(function(source, signature) for signature in signatures)
     stop = 'std::atomic<bool>' if 'std::atomic<bool> m_stopremote' in header else 'bool'
-    waitdecl = ('int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout);'
+    waitdecl = ('int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);'
                 if 'CUPnPPlayer::WaitOnEvent(' in wait else '')
     code = (PRELUDE.replace('@WAITDECL@', waitdecl).replace('@STOPTYPE@', stop)
             .replace('@PRODUCTION@', 'namespace UPNP {\n' + body + '\n}  // namespace UPNP'))
@@ -607,9 +678,9 @@ def main():
     code, header = production()
     run(code)
     # The header must declare the state the production methods use.
-    assert 'std::atomic<bool> m_closed' in header, 'm_closed must be atomic (CloseFile runs on another thread)'
+    assert 'std::atomic<uint64_t> m_openSequence' in header, 'm_openSequence must be atomic (CloseFile runs on another thread)'
     assert 'std::atomic<bool> m_stopremote' in header, 'm_stopremote must be atomic'
-    assert 'int WaitOnEvent(' in header
+    assert 'int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);' in header
     if args.negative_controls:
         for label, before, after in CONTROLS:
             assert before in code, label
@@ -619,7 +690,7 @@ def main():
 
 CASES = ['normal_open_close', 'close_twice', 'reopen', 'close_inside_wait',
          'close_inside_wait_renderer_playing', 'newer_player_on_same_renderer',
-         'close_during_last_command', 'attach']
+         'newer_open_on_same_player', 'rejected_stop', 'close_during_last_command', 'attach']
 
 
 def run(code, expect_failure=False, label=''):
