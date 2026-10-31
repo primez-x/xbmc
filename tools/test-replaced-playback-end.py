@@ -60,7 +60,7 @@ struct CPlayListPlayer {
  int selected=-1;CPlayList list;CApplication* app=nullptr;
  int GetNextItemIdx(int)const;const CPlayList& GetPlaylist(int)const{return list;}
  bool RepeatedOne(int)const{return false;}bool Repeated(int)const{return false;}
- void Reset();void SetCurrentPlaylist(int);int GetCurrentPlaylist(){return m_iCurrentPlayList;}
+ void Reset();void ResetCurrentPlaylist();void SetCurrentPlaylist(int);int GetCurrentPlaylist(){return m_iCurrentPlayList;}
  bool Terminal(int);bool Play(int,const std::string&,bool);bool PlayNext(int offset=1,bool bAutoPlay=true);
 };
 """)
@@ -72,16 +72,20 @@ HARNESS = HARNESS.replace(
     ' void Frame(){',
     ' struct {void Set(){}} m_playerEvent;int stackPlays=0,m_nextPlaylistItem=0;\n'
     ' void Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem);\n'
+    ' std::function<void()> nested;void Accept(bool bRestart,bool playlistItem);\n'
     ' bool PlayFile(CFileItem item,const std::string& name,bool bRestart=false,bool playlistItem=false){\n'
-    '  ++stackPlays;Intent(item,bRestart,playlistItem);return player.OpenFile(item,{},services.factory,name,callback);}\n'
+    '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
+    '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);Accept(bRestart,playlistItem);return ret;}\n'
     ' bool Ended();\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
-void CApplication::Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem){
- const auto appPlayer=&player;const auto stackHelper=&stack;@INTENT@}
+void CApplication::Intent(CFileItem item,bool bRestart,bool playlistItem){
+ const auto appPlayer=&player;const auto stackHelper=&stack;@ENDPLAYLIST@@INTENT@}
+// The open repeats the reset once accepted, after a dialog or a resolution.
+void CApplication::Accept(bool bRestart,bool playlistItem){@ENDPLAYLIST@ endPlaylist();}
 void CPlayListPlayer::MediaPlay(CFileItem* payload,int restart){
  auto& g_application=*app;struct {void* lpVoid;int param1,param2;} message{payload,restart,0};auto* pMsg=&message;
  @MEDIAPLAY@}
@@ -193,6 +197,29 @@ int main(){
   assert(app.player.IsPlaying());app.player.m_pPlayer->playing=false;app.Ended();
   assert(CServiceBroker::playlist.selected==1&&app.player.HasPendingOpen());
  }
+ // A playlist open nested in the resolution or a dialog of a standalone open
+ // does not survive the standalone open: the standalone EOF continues nothing.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{playlist.SetCurrentPlaylist(TYPE_VIDEO);playlist.m_iCurrentSong=0;
+   CFileItem nested;nested.id=30;assert(app.PlayFile(nested,"old",false,true));
+   assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO);};
+  CFileItem standalone;standalone.id=42;assert(app.PlayFile(standalone,"old"));
+  assert(playlist.GetCurrentPlaylist()==TYPE_NONE&&app.player.m_nextItem.pItem->id==42);
+  app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);opensLatest(app,old);
+  app.player.m_pPlayer->playing=false;app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(playlist.selected==-1&&!app.player.HasPendingOpen());
+ }
+ // A stop after the end queued the next playlist item: no notification
+ // remains, so the stop ends the playlist and leaves the visualisation.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;auto& playlist=CServiceBroker::playlist;
+  playlist.SetCurrentPlaylist(TYPE_MUSIC);CServiceBroker::gui.wm.active=WINDOW_VISUALISATION;old->hasAudio=true;
+  app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(app.player.HasPendingOpen()&&!app.player.m_waitForPlaybackStop);
+  app.StopPlaying();assert(playlist.GetCurrentPlaylist()==TYPE_NONE);
+  old->canClose=true;app.Frame();app.PlaybackCleanup();
+  assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen()&&app.player.created==0);
+  assert(CServiceBroker::gui.wm.active==HOME);
+ }
  std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
 }
 """
@@ -229,10 +256,18 @@ def main():
     code = code.replace('@PLAYLISTTERMINAL@', playlist[terminal:playlist.index('  case GUI_MSG_PLAYBACK_STARTED:')])
     code = code.replace('@PLAYLISTFUNCTIONS@', '\n'.join(function(playlist, s) for s in (
         'int CPlayListPlayer::GetNextItemIdx(int offset) const', 'void CPlayListPlayer::Reset()',
+        'void CPlayListPlayer::ResetCurrentPlaylist()',
         'void CPlayListPlayer::SetCurrentPlaylist(')))
     play = function(application, 'bool CApplication::PlayFile(')
     intent = play.index('  if (!bRestart)\n  {')
     code = code.replace('@INTENT@', play[intent:play.index('\n  }\n', intent) + 4])
+    lambda_ = play.index('  const auto endPlaylist = [&]')
+    code = code.replace('@ENDPLAYLIST@', play[lambda_:play.index('  };\n', lambda_) + 5])
+    # The accepted open and the accepted stack both repeat the reset.
+    accept = play.index('  appPlayer->OpenFile(item, options,')
+    assert '  endPlaylist();' in play[accept:], 'accepted open does not end the playlist'
+    stack = play[play.index('  if (item.IsStack())'):]
+    assert stack.index('  endPlaylist();') < stack.index('  return true;'), 'accepted stack does not end the playlist'
     media = playlist.index('    // first check if we were called from the PlayFile() function')
     code = code.replace('@MEDIAPLAY@', playlist[media:playlist.index('      return;\n    }\n', media) + 20])
     with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:

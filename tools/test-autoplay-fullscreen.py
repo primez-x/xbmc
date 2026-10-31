@@ -67,7 +67,7 @@ struct CPlayListPlayer {
  bool m_bIsDeferredPlayPending=false;void StopMessage(int);
  int m_iCurrentPlayList=1,m_iCurrentSong=0;bool atEnd=false;CPlayList list;CApplication* app=nullptr;
  int GetNextItemIdx(int){return atEnd?2:1;}const CPlayList& GetPlaylist(int){return list;}
- void Reset(){}int GetCurrentPlaylist(){return m_iCurrentPlayList;}
+ void Reset(){}void ResetCurrentPlaylist(){m_iCurrentPlayList=TYPE_NONE;}int GetCurrentPlaylist(){return m_iCurrentPlayList;}
  bool Play(int,const std::string&,bool);bool PlayNext(int offset=1,bool bAutoPlay=true);
 };
 struct CServiceBroker {
@@ -267,9 +267,9 @@ def main():
             needle='  if (m_cleanupGeneration == m_openGeneration && !m_cleanupPending)\n    return false;'
             assert code.count(needle)==1
             run(code.replace(needle,''),'gfx.restores==1')
-            needle='  m_cleanupPending = false;\n  const std::string newPlayer'
+            needle='  m_cleanupPending = false;\n  m_stopRequested = false;\n'
             assert code.count(needle)==1
-            run(code.replace(needle,'  const std::string newPlayer'),'!app.player.PlaybackCleanupPending()')
+            run(code.replace(needle,'  m_stopRequested = false;\n'),'!app.player.PlaybackCleanupPending()')
             needle='  if (!m_cleanupPending)\n  {'
             assert code.count(needle)==1
             run(code.replace(needle,'  if (true)\n  {'),'old->closes==calls+10')

@@ -2643,6 +2643,13 @@ bool CApplication::PlayFile(CFileItem item,
 
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto stackHelper = GetComponent<CApplicationStackHelper>();
+  // The end of a file that the playlist does not own must not continue the
+  // playlist. A newer open during a resolution or a dialog below can select a
+  // playlist again, so the accepted open repeats the reset.
+  const auto endPlaylist = [&]() {
+    if (!bRestart && !playlistItem)
+      CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
+  };
 
   if (!bRestart)
   {
@@ -2652,14 +2659,7 @@ bool CApplication::PlayFile(CFileItem item,
     m_nextPlaylistItem = -1;
     stackHelper->Clear();
 
-    // The end of a file that the playlist does not own must not continue the
-    // playlist. The playlist stop notification would close the player.
-    auto& playlistPlayer = CServiceBroker::GetPlaylistPlayer();
-    if (!playlistItem && playlistPlayer.GetCurrentPlaylist() != PLAYLIST::TYPE_NONE)
-    {
-      playlistPlayer.Reset();
-      playlistPlayer.SetCurrentPlaylist(PLAYLIST::TYPE_NONE);
-    }
+    endPlaylist();
 
     if (item.IsVideo())
       CUtil::ClearSubtitles();
@@ -2684,7 +2684,12 @@ bool CApplication::PlayFile(CFileItem item,
   // "seamless" seeking and total time of the movie etc.
   // will recall with restart set to true
   if (item.IsStack())
-    return PlayStack(item, bRestart);
+  {
+    if (!PlayStack(item, bRestart))
+      return false;
+    endPlaylist();
+    return true;
+  }
 
   CPlayerOptions options;
 
@@ -2928,6 +2933,7 @@ bool CApplication::PlayFile(CFileItem item,
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
   appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this);
+  endPlaylist();
   appPlayer->SetVolume(appVolume->GetVolumeRatio());
   appPlayer->SetMute(appVolume->IsMuted());
 
@@ -3048,6 +3054,10 @@ void CApplication::StopPlaying(std::shared_ptr<CEvent> completion)
     if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())
     {
       appPlayer->ClosePlayer(false, std::move(completion));
+      // Without an end or stop notification to come, for example after the stop
+      // of a queued playlist item, no notification ends the playlist.
+      if (!appPlayer->StopRequested())
+        CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
 
       // turn off visualisation window when stopping
       if ((iWin == WINDOW_VISUALISATION ||
@@ -3275,8 +3285,7 @@ bool CApplication::OnMessage(CGUIMessage& message)
       {
         // The trailer opens as a restart, which keeps the playlist. The end of the
         // trailer must not continue the playlist.
-        CServiceBroker::GetPlaylistPlayer().Reset();
-        CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(PLAYLIST::TYPE_NONE);
+        CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
         CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 1, 0,
                                                    static_cast<void*>(trailerItem.release()));
       }

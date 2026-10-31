@@ -546,6 +546,14 @@ void CPlayListPlayer::Reset()
   CServiceBroker::GetGUI()->GetWindowManager().SendMessage(msg);
 }
 
+void CPlayListPlayer::ResetCurrentPlaylist()
+{
+  if (m_iCurrentPlayList == TYPE_NONE)
+    return;
+  Reset();
+  SetCurrentPlaylist(TYPE_NONE);
+}
+
 bool CPlayListPlayer::HasPlayedFirstFile() const
 {
   return m_bPlayedFirstFile;
@@ -1145,7 +1153,12 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     {
       auto completion = pMsg->DeferCompletion();
       if (m_bIsDeferredPlayPending)
+      {
         appPlayer->ClosePlayer(false, std::move(completion));
+        // Without an end or stop notification to come, the stop ends the playlist.
+        if (!appPlayer->StopRequested())
+          ResetCurrentPlaylist();
+      }
       else
         g_application.StopPlaying(std::move(completion));
     }
