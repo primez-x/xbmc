@@ -236,6 +236,22 @@ int main(){
   app.player.m_pPlayer->playing=false;app.Ended();
   assert(playlist.selected==1&&app.player.HasPendingOpen());
  }
+ // A stop and its late end, then a playlist item that waits for the old player,
+ // then a stop of that item: no notification remains, so the stop ends the
+ // playlist and leaves the visualisation, through both stop routes.
+ for(bool deferred:{false,true}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  auto& playlist=CServiceBroker::playlist;
+  app.StopPlaying();app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.PlaylistStopped();
+  playlist.SetCurrentPlaylist(TYPE_MUSIC);playlist.m_iCurrentSong=0;
+  CServiceBroker::gui.wm.active=WINDOW_VISUALISATION;
+  CFileItem item;item.id=60;assert(app.PlayFile(item,"old",false,true));
+  assert(app.player.HasPendingOpen()&&!app.player.m_waitForPlaybackStop);
+  playlist.m_bIsDeferredPlayPending=deferred;
+  if(deferred)playlist.StopMessage(TYPE_NONE);else app.StopPlaying();
+  assert(playlist.GetCurrentPlaylist()==TYPE_NONE);
+  old->canClose=true;app.Frame();app.PlaybackCleanup();
+  assert(CServiceBroker::gui.wm.active==HOME&&!app.player.HasPlayer()&&app.player.created==0);
+ }
  std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
 }
 """

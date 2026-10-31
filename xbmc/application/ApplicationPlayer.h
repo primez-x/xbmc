@@ -55,6 +55,7 @@ public:
   void BeginOpen();
   // The newest intent before the end or stop notification of the player: a
   // newer open or an explicit stop. The notification can still report the end.
+  // An intent without an outstanding notification clears the state.
   bool OpenRequested() const;
   bool StopRequested() const;
   std::string GetCurrentPlayer() const;

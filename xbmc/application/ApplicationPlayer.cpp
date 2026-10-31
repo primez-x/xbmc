@@ -38,9 +38,9 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()
 bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> completion)
 {
   m_shutdown = m_shutdown || shutdown;
-  // Only a notification that has not arrived yet can be superseded.
-  if (m_waitForPlaybackStop)
-    m_supersededBy = Supersession::STOP;
+  // Only a notification that has not arrived yet can be superseded. Without
+  // one, no state outlives this intent.
+  m_supersededBy = m_waitForPlaybackStop ? Supersession::STOP : Supersession::NONE;
   m_nextItem.pItem.reset();
   ResetPlayer(std::move(completion));
   return !GetInternal();
@@ -207,9 +207,9 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
 void CApplicationPlayer::BeginOpen()
 {
-  // Only a notification that has not arrived yet can be superseded.
-  if (m_waitForPlaybackStop)
-    m_supersededBy = Supersession::OPEN;
+  // Only a notification that has not arrived yet can be superseded. Without
+  // one, no state outlives this intent.
+  m_supersededBy = m_waitForPlaybackStop ? Supersession::OPEN : Supersession::NONE;
 }
 
 bool CApplicationPlayer::OpenRequested() const
