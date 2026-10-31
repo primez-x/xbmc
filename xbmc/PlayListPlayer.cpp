@@ -111,7 +111,7 @@ bool CPlayListPlayer::OnMessage(CGUIMessage &message)
       const auto& components = CServiceBroker::GetAppComponents();
       const auto appPlayer = components.GetComponent<CApplicationPlayer>();
       const bool stopped{message.GetMessage() == GUI_MSG_PLAYBACK_STOPPED &&
-                         m_bPlaybackStarted && !appPlayer->HasPendingOpen()};
+                         m_bPlaybackStarted && !appPlayer->OpenRequested()};
       if (m_iCurrentPlayList != TYPE_NONE && (stopped || appPlayer->StopRequested()))
       {
         CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, m_iCurrentPlayList, m_iCurrentSong);

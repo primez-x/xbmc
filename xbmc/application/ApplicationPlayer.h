@@ -50,9 +50,13 @@ public:
   bool PreparePlaybackCleanup();
   bool PlaybackCleanupCompleted() const;
   bool PlaybackCleanupPending() const { return m_cleanupPending; }
-  // An explicit stop came before the end or stop notification of the player,
-  // and no open followed. The notification can still report the end.
-  bool StopRequested() const { return m_stopRequested; }
+  // Main registers a newer open before resolution or dialogs, which can
+  // process the end or stop notification of the current player.
+  void BeginOpen();
+  // The newest intent before the end or stop notification of the player: a
+  // newer open or an explicit stop. The notification can still report the end.
+  bool OpenRequested() const;
+  bool StopRequested() const;
   std::string GetCurrentPlayer() const;
   float GetPlaySpeed() const;
   float GetPlayTempo() const;
@@ -230,7 +234,13 @@ private:
   bool m_closeAcknowledged{false};
   bool m_waitForPlaybackStop{false};
   bool m_shutdown{false};
-  bool m_stopRequested{false};
+  enum class Supersession
+  {
+    NONE,
+    OPEN,
+    STOP,
+  };
+  Supersession m_supersededBy{Supersession::NONE};
   uint64_t m_openGeneration{0};
   std::optional<uint64_t> m_cleanupGeneration;
   bool m_cleanupPending{false};

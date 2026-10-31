@@ -216,7 +216,8 @@ def main():
                 'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
                 'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
                 'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(']
-    signatures+=['bool CApplicationPlayer::HasPendingOpen() const',
+    signatures+=['bool CApplicationPlayer::HasPendingOpen() const', 'void CApplicationPlayer::BeginOpen()',
+                  'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const',
                      'bool CApplicationPlayer::HasPendingVideoOpen() const',
                      'bool CApplicationPlayer::PreparePlaybackCleanup()',
                      'bool CApplicationPlayer::PlaybackCleanupCompleted() const']
@@ -267,9 +268,9 @@ def main():
             needle='  if (m_cleanupGeneration == m_openGeneration && !m_cleanupPending)\n    return false;'
             assert code.count(needle)==1
             run(code.replace(needle,''),'gfx.restores==1')
-            needle='  m_cleanupPending = false;\n  m_stopRequested = false;\n'
+            needle='  m_cleanupPending = false;\n  BeginOpen();\n'
             assert code.count(needle)==1
-            run(code.replace(needle,'  m_stopRequested = false;\n'),'!app.player.PlaybackCleanupPending()')
+            run(code.replace(needle,'  BeginOpen();\n'),'!app.player.PlaybackCleanupPending()')
             needle='  if (!m_cleanupPending)\n  {'
             assert code.count(needle)==1
             run(code.replace(needle,'  if (true)\n  {'),'old->closes==calls+10')

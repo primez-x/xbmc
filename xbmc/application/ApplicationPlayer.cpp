@@ -39,7 +39,8 @@ bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> comp
 {
   m_shutdown = m_shutdown || shutdown;
   // Only a notification that has not arrived yet can be superseded.
-  m_stopRequested = m_stopRequested || m_waitForPlaybackStop;
+  if (m_waitForPlaybackStop)
+    m_supersededBy = Supersession::STOP;
   m_nextItem.pItem.reset();
   ResetPlayer(std::move(completion));
   return !GetInternal();
@@ -163,7 +164,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   // cleanup of the previous player. Main still owns its close continuation.
   ++m_openGeneration;
   m_cleanupPending = false;
-  m_stopRequested = false;
+  BeginOpen();
   const std::string newPlayer = playerName.empty() ? factory.GetDefaultPlayer(item) : playerName;
   auto player = GetInternal();
   const bool replace = player &&
@@ -191,6 +192,8 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
   bool ret = player->OpenFile(item, options);
   m_waitForPlaybackStop = ret;
+  // No intent supersedes the notification of the new playback yet.
+  m_supersededBy = Supersession::NONE;
 
   m_nextItem.pItem.reset();
 
@@ -200,6 +203,23 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   m_subtitleStreamUpdate.SetExpired();
 
   return ret;
+}
+
+void CApplicationPlayer::BeginOpen()
+{
+  // Only a notification that has not arrived yet can be superseded.
+  if (m_waitForPlaybackStop)
+    m_supersededBy = Supersession::OPEN;
+}
+
+bool CApplicationPlayer::OpenRequested() const
+{
+  return m_supersededBy == Supersession::OPEN;
+}
+
+bool CApplicationPlayer::StopRequested() const
+{
+  return m_supersededBy == Supersession::STOP;
 }
 
 bool CApplicationPlayer::HasPendingOpen() const

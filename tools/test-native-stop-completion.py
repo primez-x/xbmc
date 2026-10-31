@@ -265,7 +265,8 @@ def build(baseline=None):
              'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
              'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
              'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(',
-             'bool CApplicationPlayer::HasPendingOpen() const', 'bool CApplicationPlayer::HasPendingVideoOpen() const',
+             'bool CApplicationPlayer::HasPendingOpen() const', 'void CApplicationPlayer::BeginOpen()',
+                  'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const', 'bool CApplicationPlayer::HasPendingVideoOpen() const',
              'bool CApplicationPlayer::PreparePlaybackCleanup()', 'bool CApplicationPlayer::PlaybackCleanupCompleted() const']
     if baseline:
         methods.remove('void CApplicationPlayer::CompleteCloseCompletions()')

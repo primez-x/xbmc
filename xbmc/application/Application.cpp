@@ -2643,6 +2643,9 @@ bool CApplication::PlayFile(CFileItem item,
 
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto stackHelper = GetComponent<CApplicationStackHelper>();
+  // This open supersedes an earlier stop for the end or stop notification of
+  // the current playback, also during the resolution or a dialog below.
+  appPlayer->BeginOpen();
   // The end of a file that the playlist does not own must not continue the
   // playlist. A newer open during a resolution or a dialog below can select a
   // playlist again, so the accepted open repeats the reset.
@@ -3283,10 +3286,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
       }
       else
       {
-        // The trailer opens as a restart, which keeps the playlist. The end of the
-        // trailer must not continue the playlist.
-        CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
-        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 1, 0,
+        // The trailer is a new open, which ends the playlist and the stack of the movie.
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 0, 0,
                                                    static_cast<void*>(trailerItem.release()));
       }
       break;
@@ -3327,7 +3328,7 @@ bool CApplication::OnMessage(CGUIMessage& message)
     // playlist or the EPG autoplay: each of these drops or replaces the newer
     // open, or restarts the stopped playback. For the PVR, the newer intent
     // stopped the playback.
-    const bool superseded{appPlayer->HasPendingOpen() || appPlayer->StopRequested()};
+    const bool superseded{appPlayer->OpenRequested() || appPlayer->StopRequested()};
     if (superseded)
       CServiceBroker::GetPVRManager().OnPlaybackStopped(*m_itemCurrentFile);
     else

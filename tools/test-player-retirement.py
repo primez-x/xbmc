@@ -48,8 +48,9 @@ struct CApplicationPlayer {
   CCriticalSection m_playerLock;
   std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
-  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false,m_stopRequested=false;
-  bool StopRequested()const{return m_stopRequested;}
+  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
+  enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
+  void BeginOpen();bool OpenRequested()const;bool StopRequested()const;
   uint64_t m_openGeneration=0;std::optional<uint64_t> m_cleanupGeneration;bool m_cleanupPending=false;
   struct {
     std::shared_ptr<CFileItem> pItem;CPlayerOptions options;
@@ -134,7 +135,8 @@ def main():
         'std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
         'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
         'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
-        'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(']) + TESTS
+        'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(',
+        'void CApplicationPlayer::BeginOpen()']) + TESTS
     # Main-frame retry and shutdown order are source wiring checks, not a full
     # Application runtime. The management methods above execute real bodies.
     application = (ROOT / 'xbmc/application/Application.cpp').read_text()
