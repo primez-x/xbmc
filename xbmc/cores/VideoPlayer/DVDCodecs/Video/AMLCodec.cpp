@@ -142,6 +142,7 @@ public:
   virtual int codec_init_cntl(codec_para_t *pcodec)=0;
   virtual int codec_poll_cntl(codec_para_t *pcodec)=0;
   virtual int codec_set_cntl_mode(codec_para_t *pcodec, unsigned int mode)=0;
+  virtual int codec_set_eos(codec_para_t *pcodec, int is_eos)=0;
   virtual int codec_set_cntl_avthresh(codec_para_t *pcodec, unsigned int avthresh)=0;
   virtual int codec_set_cntl_syncthresh(codec_para_t *pcodec, unsigned int syncthresh)=0;
 
@@ -170,6 +171,7 @@ class DllLibAmCodec : public DllDynamic, DllLibamCodecInterface
   DEFINE_METHOD1(int, codec_init_cntl,          (codec_para_t *p1))
   DEFINE_METHOD1(int, codec_poll_cntl,          (codec_para_t *p1))
   DEFINE_METHOD2(int, codec_set_cntl_mode,      (codec_para_t *p1, unsigned int p2))
+  DEFINE_METHOD2(int, codec_set_eos,            (codec_para_t *p1, int p2))
   DEFINE_METHOD2(int, codec_set_cntl_avthresh,  (codec_para_t *p1, unsigned int p2))
   DEFINE_METHOD2(int, codec_set_cntl_syncthresh,(codec_para_t *p1, unsigned int p2))
 
@@ -193,6 +195,7 @@ class DllLibAmCodec : public DllDynamic, DllLibamCodecInterface
     RESOLVE_METHOD(codec_init_cntl)
     RESOLVE_METHOD(codec_poll_cntl)
     RESOLVE_METHOD(codec_set_cntl_mode)
+    RESOLVE_METHOD(codec_set_eos)
     RESOLVE_METHOD(codec_set_cntl_avthresh)
     RESOLVE_METHOD(codec_set_cntl_syncthresh)
 
@@ -2162,6 +2165,7 @@ bool CAMLCodec::OpenDecoderInternal()
   m_speed = DVD_PLAYSPEED_NORMAL;
   m_drain = false;
   m_stream_eof = false;
+  m_inputEnded = false;
   m_no_data_since_reset = true;
   m_stillFrameDrain = {};
   m_cur_pts = DVD_NOPTS_VALUE;
@@ -2753,6 +2757,17 @@ void CAMLCodec::Abort()
   m_abort = true;
 }
 
+// The decoder keeps its last pictures (the H.264 and HEVC reorder buffers)
+// for the next input. At the end of the input it outputs them after the
+// stream buffer is empty.
+void CAMLCodec::SetInputEnded()
+{
+  if (!m_opened || m_inputEnded)
+    return;
+  m_dll->codec_set_eos(&am_private->vcodec, 1);
+  m_inputEnded = true;
+}
+
 void CAMLCodec::ResetInternal()
 {
   m_abort = false;
@@ -2782,6 +2797,11 @@ void CAMLCodec::ResetInternal()
   m_dvBackendSampleTime = 0;
   // reset the decoder
   m_dll->codec_reset(&am_private->vcodec);
+  if (m_inputEnded)
+  {
+    m_dll->codec_set_eos(&am_private->vcodec, 0);
+    m_inputEnded = false;
+  }
   m_dll->codec_set_video_delay_limited_ms(&am_private->vcodec, 1000);
 
   dumpfile_close(am_private);
@@ -3550,6 +3570,11 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture& videoPicture)
     bool frames_flowing = elapsed_since_last_frame < std::chrono::milliseconds(poll_ms);
     if (buffer_level > 0.0f &&
         (drain_elapsed < std::chrono::seconds(m_decoder_drain_timeout) || frames_flowing))
+      return CDVDVideoCodec::VC_NONE;
+    // At the end of the input, the decoder outputs its last pictures after it
+    // read the stream buffer
+    if (m_inputEnded && frames_flowing &&
+        drain_elapsed < std::chrono::seconds(m_decoder_drain_timeout))
       return CDVDVideoCodec::VC_NONE;
     return CDVDVideoCodec::VC_EOF;
   }
