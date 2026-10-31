@@ -411,6 +411,19 @@ int main(){
    assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50);};
   old->playing=false;app.Ended();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.m_closingPlayer);
+  // C has not reported the video stream yet, and keeps fullscreen.
+  assert(!app.player.m_pPlayer->hasVideo&&gfx.fullscreen&&gfx.restores==0);
+ }
+ // After the retries, the failure dialog: a stop and a restart of the same item
+ // during the dialog. The cancelled attempt does not end the newer playlist.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlistRetries=1;
+  app.StopPlaying();app.player.OnPlaybackStopped();app.Frame();playlist.SetCurrentPlaylist(TYPE_VIDEO);
+  app.nested=[&]{app.abandon=true;};
+  failureDialog=[&]{app.StopPlaying();playlist.SetCurrentPlaylist(TYPE_VIDEO);assert(playlist.Play(0,"old"));};
+  assert(!playlist.Play(0,"old"));playlistRetries=100;failureDialog={};
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40);
  }
  // The end of A during the resolution of item B; B fails, and the playlist
  // continues at C: the waiting cleanup does not leave fullscreen before C.
@@ -438,7 +451,8 @@ struct CFileItem {
  Tag tag;Tag* GetVideoInfoTag(){return &tag;}std::string GetDynPath()const{return "probe";}
  int GetStartOffset()const{return 0;}void SetStartOffset(int){}
 """, 1)
-    code = code.replace('struct SettingsComponent {', """struct CAdvancedSettings {int m_playlistRetries=100,m_playlistTimeout=0;};
+    code = code.replace('struct SettingsComponent {', """static int playlistRetries=100;static std::function<void()> failureDialog;
+struct CAdvancedSettings {int m_playlistRetries=playlistRetries,m_playlistTimeout=0;};
 struct SettingsComponent {
  std::shared_ptr<CAdvancedSettings> GetAdvancedSettings(){return std::make_shared<CAdvancedSettings>();}
 """, 1)
@@ -472,7 +486,7 @@ struct CPlayList {
 struct CLog {template<class... A>static void Log(A&&...){}};
 struct CURL {CURL(const std::string&){} static std::string GetRedacted(const std::string& s){return s;}};
 namespace XFILE {struct CVideoDatabaseFile {static Tag GetVideoTag(const CURL&){return {};}};}
-namespace HELPERS {template<class... A>void ShowOKDialogText(A&&...){}}
+namespace HELPERS {template<class... A>void ShowOKDialogText(A&&...){if(failureDialog){auto dialog=std::move(failureDialog);dialog();}}}
 namespace DETECTOR_PLAYBACK {constexpr auto PROPERTY="playback";}
 namespace DETECTOR_ADMISSION {constexpr auto ITEM_SKIP="skip";void CaptureItem(CFileItem&) {}}
 """ + production) + PLAY_TESTS

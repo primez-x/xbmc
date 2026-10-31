@@ -3041,7 +3041,8 @@ void CApplication::PlaybackCleanup()
     appPlayer->OpenNext(m_ServiceManager->GetPlayerCoreFactory());
   }
 
-  if (cleanup && !appPlayer->IsPlayingVideo())
+  // An opened video keeps fullscreen before the player reports the video stream.
+  if (cleanup && !appPlayer->IsPlayingVideo() && !appPlayer->IsPlayingOpenedVideo())
   {
     if(CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_FULLSCREEN_VIDEO ||
        CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_FULLSCREEN_GAME)

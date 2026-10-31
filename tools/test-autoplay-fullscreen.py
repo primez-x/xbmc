@@ -259,7 +259,7 @@ def main():
             run(code.replace(needle,'').replace('  if (HasPendingOpen())\n    return false;','')
                 .replace('generation != m_openGeneration || HasPendingOpen() || HasPlayer()',
                          'generation != m_openGeneration || HasPlayer()'),
-                "Assertion `gfx.fullscreen'")
+                "Assertion `!app.player.HasPlayer()&&app.player.HasPendingOpen()'")
             needle='  if (opening && !appPlayer->HasPendingOpen() && (!openingVideo || !appPlayer->IsPlaying()))'
             assert code.count(needle)==1
             run(code.replace(needle,needle.replace('if (opening', 'if (false && opening')),

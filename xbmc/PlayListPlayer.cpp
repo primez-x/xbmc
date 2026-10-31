@@ -415,7 +415,8 @@ bool CPlayListPlayer::Play(int iSong,
 
       // open error dialog
       HELPERS::ShowOKDialogText(CVariant{16026}, CVariant{16027});
-      if (!selectionIsCurrent())
+      // A stop during the dialog cancels this attempt, also when the same item restarted.
+      if (appPlayer->OpenCancelled(attempt) || !selectionIsCurrent())
         return false;
 
       CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, playlistId, m_iCurrentSong.load());
