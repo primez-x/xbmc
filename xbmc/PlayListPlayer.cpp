@@ -103,7 +103,12 @@ bool CPlayListPlayer::OnMessage(CGUIMessage &message)
     break;
   case GUI_MSG_PLAYBACK_STOPPED:
     {
-      if (m_iCurrentPlayList != TYPE_NONE && m_bPlaybackStarted)
+      // The stop of a playback that a newer open replaces does not stop the
+      // playlist: the playlist stop closes the player and drops the newer open.
+      // An explicit stop drops the newer open before this notification.
+      const auto& components = CServiceBroker::GetAppComponents();
+      const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+      if (m_iCurrentPlayList != TYPE_NONE && m_bPlaybackStarted && !appPlayer->HasPendingOpen())
       {
         CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, m_iCurrentPlayList, m_iCurrentSong);
         CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);

@@ -3296,7 +3296,15 @@ bool CApplication::OnMessage(CGUIMessage& message)
     PLAYBACK_DIAGNOSTICS::endDisplay.Begin(PLAYBACK_DIAGNOSTICS::NowUs(), "ended");
 #endif
     GetComponent<CApplicationPlayer>()->OnPlaybackStopped();
-    CServiceBroker::GetPVRManager().OnPlaybackEnded(*m_itemCurrentFile);
+    // A newer open waits until this player retires. The end of the replaced
+    // playback must not continue the stack, the playlist or the EPG autoplay,
+    // or close the player: each of these drops or replaces the newer open. For
+    // the PVR, the newer open stopped the playback.
+    const bool replaced{GetComponent<CApplicationPlayer>()->HasPendingOpen()};
+    if (replaced)
+      CServiceBroker::GetPVRManager().OnPlaybackStopped(*m_itemCurrentFile);
+    else
+      CServiceBroker::GetPVRManager().OnPlaybackEnded(*m_itemCurrentFile);
 
     CVariant data(CVariant::VariantTypeObject);
     data["end"] = true;
@@ -3305,7 +3313,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
     m_playerEvent.Set();
     const auto stackHelper = GetComponent<CApplicationStackHelper>();
-    if (stackHelper->IsPlayingRegularStack() && stackHelper->HasNextStackPartFileItem())
+    if (!replaced && stackHelper->IsPlayingRegularStack() &&
+        stackHelper->HasNextStackPartFileItem())
     { // just play the next item in the stack
       PlayFile(stackHelper->SetNextStackPartCurrentFileItem(), "", true);
       return true;
@@ -3317,7 +3326,7 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
     ResetCurrentItem();
 
-    if (!isEpgPlaylistItem)
+    if (!replaced && !isEpgPlaylistItem)
     {
       if (!CServiceBroker::GetPlaylistPlayer().PlayNext(1, true))
         GetComponent<CApplicationPlayer>()->ClosePlayer();
