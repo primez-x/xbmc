@@ -17,6 +17,7 @@ PRELUDE = r'''
 #include <cassert>
 #include <algorithm>
 #include <vector>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -38,7 +39,11 @@ struct IPlayer {
   ~IPlayer(){assert(!applicationLock||!applicationLock->held);if(destroyed)++*destroyed;}
   bool IsPlaying(){return playing;}
   bool CloseFile(bool=false){++closes;return canClose;}
-  bool OpenFile(const CFileItem& file,const CPlayerOptions&){++opens;lastItem=file.id;playing=true;return true;}
+  // A backend that processes messages during the open (UPnP) runs duringOpen.
+  std::function<void()> duringOpen;
+  bool OpenFile(const CFileItem& file,const CPlayerOptions&){
+    ++opens;if(auto hook=std::exchange(duringOpen,nullptr))hook();
+    lastItem=file.id;playing=true;return true;}
 };
 struct CPlayerCoreFactory {
   std::string GetDefaultPlayer(const CFileItem&)const{return "new";}
@@ -56,6 +61,7 @@ struct CApplicationPlayer {
   bool IsPlayingOpenedVideo()const;uint64_t GetOpenGeneration()const{return m_openGeneration;}
   bool OpenRequested()const;bool StopRequested()const;void Supersede(Supersession);
   uint64_t m_openGeneration=0;std::optional<uint64_t> m_cleanupGeneration;bool m_cleanupPending=false;
+  IPlayer* m_openingPlayer=nullptr;
   struct {
     std::shared_ptr<CFileItem> pItem;CPlayerOptions options;
     std::string playerName;IPlayerCallback* callback=nullptr;uint64_t intent=0;
@@ -132,6 +138,26 @@ int main(){
    app.ResetPlayer();auto replacement=std::make_shared<IPlayer>();app.m_pPlayer=replacement;
    original->canClose=true;app.ContinueClose();
    assert(app.GetInternal()==replacement && replacement->closes==0 && !app.m_closingPlayer);}
+  // A newer open during the backend open of an older open on the same player
+  // replaces the player: one backend never runs two opens.
+  {CApplicationPlayer app;int destroyed=0;auto player=std::make_shared<IPlayer>();app.m_pPlayer=player;
+   player->m_name="new";player->m_type="remote";player->playing=true;player->destroyed=&destroyed;
+   player->applicationLock=&app.m_playerLock;app.m_waitForPlaybackStop=true;
+   CFileItem older;older.id=10;CFileItem newer;newer.id=11;
+   player->duringOpen=[&]{
+     assert(app.OpenFile(newer,options,factory,"new",callback));
+     assert(app.m_closingPlayer==player && player->closes==1 && player->opens==1 && app.m_nextItem.pItem);};
+   assert(!app.OpenFile(older,options,factory,"new",callback));
+   assert(player->opens==1 && app.m_closingPlayer==player && app.m_nextItem.pItem);
+   player->canClose=true;app.OnPlaybackStopped();app.ContinueClose();
+   assert(!app.GetInternal() && !app.m_closingPlayer);
+   player.reset();assert(destroyed==1);
+   app.OpenNext(factory);
+   assert(app.created==1 && app.GetInternal()->lastItem==11 && app.GetInternal()->opens==1);
+   // the new player is not in an open: a later open reuses the new player
+   CFileItem later;later.id=12;app.GetInternal()->m_type="remote";
+   assert(app.OpenFile(later,options,factory,"new",callback));
+   assert(app.created==1 && app.GetInternal()->lastItem==12 && app.GetInternal()->opens==2);}
   // Ordinary playing video stream changes retain the player and its startup epoch domain.
   {CApplicationPlayer app;auto player=std::make_shared<IPlayer>();app.m_pPlayer=player;
    player->playing=true;assert(app.OpenFile(file,options,factory,"old",callback));
