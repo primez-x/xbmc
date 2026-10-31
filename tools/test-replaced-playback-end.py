@@ -622,6 +622,97 @@ namespace DETECTOR_ADMISSION {constexpr auto ITEM_SKIP="skip";void CaptureItem(C
 """ + production) + PLAY_TESTS
 
 
+
+# The Blu-ray menu of a stack part: the production stack branch and menu block run
+# in a small StartPlayback. A newer open accepted during the menu supersedes the
+# open, also when the user then cancels the menu.
+MENU = r"""
+#include <cassert>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+struct CFileItem {
+  bool stack = false;
+  bool IsStack() const { return stack; }
+  bool IsBDFile() const { return !stack; }
+  bool IsDiscImage() const { return false; }
+};
+struct CPlayerOptions { double startpercent = 0, starttime = 0; };
+struct Playlist { int current = 0; void ResetCurrentPlaylist() { current = -1; } } playlist;
+struct CServiceBroker { static Playlist& GetPlaylistPlayer() { return playlist; } };
+struct Factory {
+  std::string GetDefaultPlayer(const CFileItem&) const { return "VideoPlayer"; }
+  bool IsExternalPlayer(const std::string&) const { return false; }
+  bool IsRemotePlayer(const std::string&) const { return false; }
+};
+struct ServiceManager { Factory factory; Factory& GetPlayerCoreFactory() { return factory; } };
+struct Player {
+  uint64_t accepted = 0, sequence = 0;
+  bool OpenSuperseded(uint64_t intent) const { return intent < accepted; }
+};
+struct CGUIDialogSimpleMenu {
+  static std::function<bool()> menu;
+  static bool ShowPlaySelection(CFileItem&) { return menu(); }
+};
+std::function<bool()> CGUIDialogSimpleMenu::menu;
+struct App {
+  std::unique_ptr<ServiceManager> m_ServiceManager = std::make_unique<ServiceManager>();
+  Player player;
+  int opened = 0;
+  bool PlayStack(CFileItem&, bool, uint64_t intent) {
+    return StartPlayback(CFileItem{}, "", true, false, intent);
+  }
+  bool StartPlayback(CFileItem item, const std::string& player, bool bRestart, bool playlistItem,
+                     uint64_t intent) {
+    auto* appPlayer = &this->player;
+    CPlayerOptions options;
+@ENDPLAYLIST@
+@STACK@
+@MENU@
+  if (appPlayer->OpenSuperseded(intent))
+    return false;
+  appPlayer->accepted = intent;
+  ++opened;
+  endPlaylist();
+  return true;
+  }
+};
+int main() {
+  for (const bool select : {false, true}) {
+    App app;
+    playlist.current = 0;
+    const uint64_t older = ++app.player.sequence;
+    CGUIDialogSimpleMenu::menu = [&] {
+      // a newer playlist item is accepted during the menu
+      playlist.current = 1;
+      app.player.accepted = ++app.player.sequence;
+      return select;
+    };
+    assert(!app.StartPlayback(CFileItem{true}, "", false, false, older));
+    assert(playlist.current == 1 && app.opened == 0);
+  }
+  for (const bool select : {false, true}) {
+    App app;
+    playlist.current = 0;
+    CGUIDialogSimpleMenu::menu = [&] { return select; };
+    // a cancelled menu ends the request without an error, a selection opens the part
+    assert(app.StartPlayback(CFileItem{true}, "", false, false, ++app.player.sequence));
+    assert(playlist.current == -1 && app.opened == (select ? 1 : 0));
+  }
+}
+"""
+
+
+def menu_program(play):
+    lambda_ = play.index('  const auto endPlaylist = [&]')
+    stack = play.index('  if (item.IsStack())')
+    menu = play.index('  // a disc image might be Blu-Ray disc')
+    return (MENU.replace('@ENDPLAYLIST@', play[lambda_:play.index('  };\n', lambda_) + 5])
+            .replace('@STACK@', play[stack:play.index('\n  }\n', stack) + 4])
+            .replace('@MENU@', play[menu:play.index('  // this really aught to be inside !bRestart', menu)]))
+
+
 def compile_run(code, label):
     with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:
         out = Path(tmp)
@@ -689,10 +780,6 @@ def main():
     assert play.rindex(cancelled, 0, stack_open) > play.index('if (dir && !dir->Resolve(item))'), 'stack accepted after a stop'
     assert '  endPlaylist();' in play[accept:], 'accepted open does not end the playlist'
     assert play.index(cancelled, accept) < play.index('  endPlaylist();', accept), 'backend open not superseded'
-    # The open checks again after the Blu-ray menu, before the open discards the
-    # notifications of the current playback.
-    menu = play.index('CGUIDialogSimpleMenu::ShowPlaySelection(item)')
-    assert play.index(cancelled, menu) < play.index('RemoveThreadMessageByMessageIds(', menu), 'menu not superseded'
     # One request owns one intent: the playlist attempt and the stack part.
     assert 'if (attempt)\n    return StartPlayback(std::move(item), player, bRestart, playlistItem, attempt);' in wrapper
     assert 'PlayStack(item, bRestart, intent)' in play
@@ -743,6 +830,8 @@ def main():
     assert single.rindex('g_application.EndOpen(intent);') > single.index('PlayMedia(*item')
     compile_run(code, '')
     compile_run(production_play(code, playlist, function), '-play')
+    compile_run(menu_program(play), '-menu')
+    print('PASS production Blu-ray menu: a newer open during the menu supersedes the open, also on cancel')
 
 
 if __name__ == '__main__':

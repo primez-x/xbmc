@@ -2876,15 +2876,15 @@ bool CApplication::StartPlayback(CFileItem item,
     if (isSimpleMenuAllowed)
     {
       // Check if we must show the simplified bd menu.
-      if (!CGUIDialogSimpleMenu::ShowPlaySelection(item))
+      const bool selected = CGUIDialogSimpleMenu::ShowPlaySelection(item);
+      // A stop or a newer open during the menu supersedes the open, also when the
+      // user cancels the menu, before the options read the stack of the open
+      if (appPlayer->OpenSuperseded(intent))
+        return false;
+      if (!selected)
         return true;
     }
   }
-
-  // A stop or a newer open during the menu supersedes the open, before the
-  // options read the stack of the open
-  if (appPlayer->OpenSuperseded(intent))
-    return false;
 
   // this really aught to be inside !bRestart, but since PlayStack
   // uses that to init playback, we have to keep it outside
