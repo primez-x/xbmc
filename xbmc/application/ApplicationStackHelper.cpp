@@ -32,6 +32,18 @@ void CApplicationStackHelper::Clear()
   m_currentStack->Clear();
 }
 
+void CApplicationStackHelper::Adopt(CApplicationStackHelper&& stack)
+{
+  std::unique_lock<CCriticalSection> lock(m_critSection);
+  for (auto& registration : stack.m_stackmap)
+    m_stackmap[registration.first] = std::move(registration.second);
+  stack.m_stackmap.clear();
+  m_currentStack = std::move(stack.m_currentStack);
+  stack.m_currentStack = std::make_unique<CFileItemList>();
+  m_currentStackPosition = stack.m_currentStackPosition;
+  m_currentStackIsDiscImageStack = stack.m_currentStackIsDiscImageStack;
+}
+
 void CApplicationStackHelper::OnPlayBackStarted(const CFileItem& item)
 {
   std::unique_lock<CCriticalSection> lock(m_critSection);

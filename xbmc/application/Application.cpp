@@ -2528,6 +2528,10 @@ bool CApplication::StartMedia(CFileItem& item,
                               uint64_t intent)
 {
   const auto appPlayer = GetComponent<CApplicationPlayer>();
+  // A new request ends the playlist when the request begins, like the GUI callers
+  // before PlayFile, also when the resolution below fails.
+  m_nextPlaylistItem = -1;
+  CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
   // if the item is a plugin we need to resolve the plugin paths
   if (URIUtils::HasPluginPath(item) && !XFILE::CPluginDirectory::GetResolvedPluginResult(item))
     return false;
@@ -2628,13 +2632,23 @@ bool CApplication::StartMedia(CFileItem& item,
 // A faster calculation of video time would improve this
 // substantially.
 // return value: same with PlayFile()
+// The stack that a request prepares. The request adopts the stack when the open
+// of the part is accepted, so a request that fails changes no current stack.
+struct CApplication::StagedStack
+{
+  CApplicationStackHelper stack;
+  bool restart = false; // a restart of the current playback
+};
+
 bool CApplication::PlayStack(CFileItem& item, bool bRestart, uint64_t intent)
 {
-  const auto stackHelper = GetComponent<CApplicationStackHelper>();
-  if (!stackHelper->InitializeStack(item))
+  StagedStack staged;
+  staged.restart = bRestart;
+  CApplicationStackHelper& stack = staged.stack;
+  if (!stack.InitializeStack(item))
     return false;
 
-  std::optional<int> startoffset = stackHelper->InitializeStackStartPartAndOffset(item);
+  std::optional<int> startoffset = stack.InitializeStackStartPartAndOffset(item);
   if (!startoffset)
   {
     CLog::LogF(LOGERROR, "Failed to obtain start offset for stack {}. Aborting playback.",
@@ -2642,7 +2656,7 @@ bool CApplication::PlayStack(CFileItem& item, bool bRestart, uint64_t intent)
     return false;
   }
 
-  CFileItem selectedStackPart = stackHelper->GetCurrentStackPartFileItem();
+  CFileItem selectedStackPart = stack.GetCurrentStackPartFileItem();
   selectedStackPart.SetStartOffset(startoffset.value());
 
   if (item.HasProperty("savedplayerstate"))
@@ -2652,7 +2666,7 @@ bool CApplication::PlayStack(CFileItem& item, bool bRestart, uint64_t intent)
   }
 
   // The part belongs to the request of the stack
-  return StartPlayback(std::move(selectedStackPart), "", true, false, intent);
+  return StartPlayback(std::move(selectedStackPart), "", true, false, intent, &staged);
 }
 
 bool CApplication::PlayFile(CFileItem item,
@@ -2687,7 +2701,8 @@ bool CApplication::StartPlayback(CFileItem item,
                                  const std::string& player,
                                  bool bRestart,
                                  bool playlistItem,
-                                 uint64_t intent)
+                                 uint64_t intent,
+                                 StagedStack* staged)
 {
   // Ensure the MIME type has been retrieved for http:// and shout:// streams
   if (item.GetMimeType().empty())
@@ -2695,6 +2710,10 @@ bool CApplication::StartPlayback(CFileItem item,
 
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto stackHelper = GetComponent<CApplicationStackHelper>();
+  // The stack of this open: the stack that a stack request prepared, no stack for
+  // another new open, and the current stack for a restart of the current playback
+  const CApplicationStackHelper* stack =
+      staged ? &staged->stack : (bRestart ? stackHelper.get() : nullptr);
   // The end of a file that the playlist does not own must not continue the
   // playlist. A newer open during a resolution or a dialog below can select a
   // playlist again, so the accepted open repeats the reset.
@@ -2705,16 +2724,10 @@ bool CApplication::StartPlayback(CFileItem item,
 
   if (!bRestart)
   {
-    // bRestart will be true when called from PlayStack(), skipping this block
-    appPlayer->SetPlaySpeed(1);
-
+    // bRestart will be true when called from PlayStack(), skipping this block.
+    // The current playback changes only when the open is accepted, see below.
     m_nextPlaylistItem = -1;
-    stackHelper->Clear();
-
     endPlaylist();
-
-    if (item.IsVideo())
-      CUtil::ClearSubtitles();
   }
 
   if (item.IsDiscStub())
@@ -2763,7 +2776,7 @@ bool CApplication::StartPlayback(CFileItem item,
     if (item.HasVideoInfoTag())
       options.state = item.GetVideoInfoTag()->GetResumePoint().playerState;
   }
-  if (!bRestart || stackHelper->IsPlayingISOStack())
+  if (!bRestart || (stack && stack->IsPlayingISOStack()))
   {
     // the following code block is only applicable when bRestart is false OR to ISO stacks
 
@@ -2868,8 +2881,8 @@ bool CApplication::StartPlayback(CFileItem item,
     }
   }
 
-  // A stop or a newer open during the menu supersedes the open, before the open
-  // discards the notifications of the current playback
+  // A stop or a newer open during the menu supersedes the open, before the
+  // options read the stack of the open
   if (appPlayer->OpenSuperseded(intent))
     return false;
 
@@ -2892,11 +2905,11 @@ bool CApplication::StartPlayback(CFileItem item,
         CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_fullScreenOnMovieStart &&
         !CMediaSettings::GetInstance().DoesMediaStartWindowed();
   }
-  else if (stackHelper->IsPlayingRegularStack())
+  else if (stack && stack->IsPlayingRegularStack())
   {
     //! @todo - this will fail if user seeks back to first file in stack
-    if (stackHelper->GetCurrentPartNumber() == 0 ||
-        stackHelper->GetRegisteredStack(item)->GetStartOffset() != 0)
+    if (stack->GetCurrentPartNumber() == 0 ||
+        stack->GetRegisteredStack(item)->GetStartOffset() != 0)
       options.fullscreen = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->
           m_fullScreenOnMovieStart && !CMediaSettings::GetInstance().DoesMediaStartWindowed();
     else
@@ -2912,31 +2925,6 @@ bool CApplication::StartPlayback(CFileItem item,
 
   // reset VideoStartWindowed as it's a temp setting
   CMediaSettings::GetInstance().SetMediaStartWindowed(false);
-
-  {
-    // for playing a new item, previous playing item's callback may already
-    // pushed some delay message into the threadmessage list, they are not
-    // expected be processed after or during the new item playback starting.
-    // so we clean up previous playing item's playback callback delay messages here.
-    // A discarded terminal notification also retires the old player's callback
-    // obligation. Other obsolete messages must not acknowledge a pending stop.
-    int terminalMessages[] = {GUI_MSG_PLAYBACK_ENDED, GUI_MSG_PLAYBACK_STOPPED, 0};
-    if (CServiceBroker::GetGUI()->GetWindowManager().RemoveThreadMessageByMessageIds(
-            terminalMessages) > 0)
-      appPlayer->OnPlaybackStopped();
-    int previousMsgsIgnoredByNewPlaying[] = {
-      GUI_MSG_PLAYBACK_STARTED,
-      GUI_MSG_PLAYLIST_CHANGED,
-      GUI_MSG_PLAYLISTPLAYER_STOPPED,
-      GUI_MSG_PLAYLISTPLAYER_STARTED,
-      GUI_MSG_PLAYLISTPLAYER_CHANGED,
-      GUI_MSG_QUEUE_NEXT_ITEM,
-      0
-    };
-    int dMsgCount = CServiceBroker::GetGUI()->GetWindowManager().RemoveThreadMessageByMessageIds(&previousMsgsIgnoredByNewPlaying[0]);
-    if (dMsgCount > 0)
-      CLog::LogF(LOGDEBUG, "Ignored {} playback thread messages", dMsgCount);
-  }
 
   // --- MKV EDITIONS SELECTION ---
   bool editionsEnabled = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_VIDEOPLAYER_MKV_EDITIONS_ENABLED);
@@ -2994,6 +2982,44 @@ bool CApplication::StartPlayback(CFileItem item,
   // A stop or a newer open during a dialog supersedes the open
   if (appPlayer->OpenSuperseded(intent))
     return false;
+
+  // The open is accepted and takes over from the current playback: the stack,
+  // the speed, the temporary subtitles and the notifications of the playback.
+  if (staged)
+    stackHelper->Adopt(std::move(staged->stack));
+  else if (!bRestart)
+    stackHelper->Clear();
+  if (!bRestart || (staged && !staged->restart))
+  {
+    appPlayer->SetPlaySpeed(1);
+    if (item.IsVideo())
+      CUtil::ClearSubtitles();
+  }
+
+  {
+    // for playing a new item, previous playing item's callback may already
+    // pushed some delay message into the threadmessage list, they are not
+    // expected be processed after or during the new item playback starting.
+    // so we clean up previous playing item's playback callback delay messages here.
+    // A discarded terminal notification also retires the old player's callback
+    // obligation. Other obsolete messages must not acknowledge a pending stop.
+    int terminalMessages[] = {GUI_MSG_PLAYBACK_ENDED, GUI_MSG_PLAYBACK_STOPPED, 0};
+    if (CServiceBroker::GetGUI()->GetWindowManager().RemoveThreadMessageByMessageIds(
+            terminalMessages) > 0)
+      appPlayer->OnPlaybackStopped();
+    int previousMsgsIgnoredByNewPlaying[] = {
+      GUI_MSG_PLAYBACK_STARTED,
+      GUI_MSG_PLAYLIST_CHANGED,
+      GUI_MSG_PLAYLISTPLAYER_STOPPED,
+      GUI_MSG_PLAYLISTPLAYER_STARTED,
+      GUI_MSG_PLAYLISTPLAYER_CHANGED,
+      GUI_MSG_QUEUE_NEXT_ITEM,
+      0
+    };
+    int dMsgCount = CServiceBroker::GetGUI()->GetWindowManager().RemoveThreadMessageByMessageIds(&previousMsgsIgnoredByNewPlaying[0]);
+    if (dMsgCount > 0)
+      CLog::LogF(LOGDEBUG, "Ignored {} playback thread messages", dMsgCount);
+  }
 
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();

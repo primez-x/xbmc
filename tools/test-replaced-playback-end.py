@@ -32,7 +32,8 @@ HARNESS = HARNESS.replace(
     ' void SendMessage(CGUIMessage&){}int threadMessages=0;void SendThreadMessage(CGUIMessage&){++threadMessages;}')
 HARNESS = HARNESS.replace(
     'struct CApplicationStackHelper {int clears=0;void Clear(){++clears;}};',
-    'struct CApplicationStackHelper {int clears=0;bool regular=false,next=false;void Clear(){++clears;}'
+    'struct CApplicationStackHelper {int clears=0,adopts=0;bool regular=false,next=false;void Clear(){++clears;}'
+    'void Adopt(CApplicationStackHelper&&){++adopts;}'
     'bool IsPlayingRegularStack(){return regular;}bool HasNextStackPartFileItem(){return next;}'
     'CFileItem SetNextStackPartCurrentFileItem(){CFileItem part;part.id=77;return part;}};')
 HARNESS = HARNESS.replace(
@@ -82,9 +83,9 @@ HARNESS = HARNESS.replace(
     ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem,uint64_t intent){\n'
     '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
     '  if(abandon)return false;\n'
-    '  const auto appPlayer=&player;@CANCELLED@\n'
+    '  const auto appPlayer=&player;@CANCELLED@Acceptance(item,bRestart);\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback,intent);@CANCELLED@Accept(bRestart,playlistItem);return ret;}\n'
-    ' bool Ended();void EndOpen(uint64_t intent);\n void Frame(){')
+    ' bool Ended();void EndOpen(uint64_t intent);void Acceptance(CFileItem& item,bool bRestart);\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
@@ -92,8 +93,12 @@ bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bResta
 @ENDOPEN@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
-void CApplication::Intent(CFileItem item,bool bRestart,bool playlistItem){
- const auto appPlayer=&player;const auto stackHelper=&stack;@ENDPLAYLIST@@INTENT@}
+void CApplication::Intent([[maybe_unused]] CFileItem item,bool bRestart,bool playlistItem){
+ @ENDPLAYLIST@@INTENT@}
+// The production effects of an accepted open on the current playback.
+struct StagedStack {CApplicationStackHelper stack;bool restart=false;};
+void CApplication::Acceptance(CFileItem& item,bool bRestart){
+ const auto appPlayer=&player;const auto stackHelper=&stack;StagedStack* staged=nullptr;@ACCEPTANCE@}
 // The open repeats the reset once accepted, after a dialog or a resolution.
 void CApplication::Accept(bool bRestart,bool playlistItem){@ENDPLAYLIST@ endPlaylist();}
 void CPlayListPlayer::MediaPlay(CFileItem* payload,int restart){
@@ -539,6 +544,13 @@ int main(){
   assert(playlist.Play(1,"old"));app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);
  }
+ // A request that fails before the player keeps the stack of the current
+ // playback; an accepted request ends the stack.
+ {CApplication app;begin(app);reset();app.stack.regular=true;
+  app.abandon=true;CFileItem y;y.id=50;assert(!app.PlayFile(y,"old",false,false));
+  assert(app.stack.clears==0&&app.stack.adopts==0);
+  CFileItem z;z.id=51;assert(app.PlayFile(z,"old",false,false));assert(app.stack.clears==1);
+ }
  // A stop alone during a backend open: the open writes no player state.
  {CApplication app;begin(app);reset();
   app.player.m_pPlayer.reset();app.player.m_waitForPlaybackStop=false;
@@ -684,8 +696,24 @@ def main():
     # One request owns one intent: the playlist attempt and the stack part.
     assert 'if (attempt)\n    return StartPlayback(std::move(item), player, bRestart, playlistItem, attempt);' in wrapper
     assert 'PlayStack(item, bRestart, intent)' in play
+    # A stack request prepares the stack privately; the accepted open adopts the
+    # stack. Every effect on the current playback follows the last dialog check,
+    # and the open reads the stack of the open, not the current stack.
     stack = function(application, 'bool CApplication::PlayStack(')
-    assert 'return StartPlayback(std::move(selectedStackPart), "", true, false, intent);' in stack
+    assert 'GetComponent<CApplicationStackHelper>' not in stack
+    assert 'return StartPlayback(std::move(selectedStackPart), "", true, false, intent, &staged);' in stack
+    end = play.index('  // --- END ---')
+    for effect in ('stackHelper->Adopt(', 'stackHelper->Clear()', 'SetPlaySpeed(1)', 'CUtil::ClearSubtitles()',
+                   'RemoveThreadMessageByMessageIds('):
+        assert effect in play and play.rindex(cancelled, 0, play.index(effect)) > end, effect
+    assert 'stackHelper->Is' not in play and 'stackHelper->Get' not in play, 'open reads the current stack'
+    acceptance = play.index('  // The open is accepted')
+    code = code.replace('@ACCEPTANCE@', play[acceptance:play.index('  {\n    // for playing a new item', acceptance)])
+    callback = (ROOT / 'xbmc/application/ApplicationPlayerCallback.cpp').read_text()
+    started = function(callback, 'void CApplicationPlayerCallback::OnPlayBackStarted(')
+    assert 'const auto stack = stackHelper->GetRegisteredStack(file);\n  if (stack && (' in started, 'callback reads an absent stack'
+    media = function(application, 'bool CApplication::StartMedia(')
+    assert media.index('ResetCurrentPlaylist();') < media.index('GetResolvedPluginResult(item)'), 'request keeps the playlist'
     assert 'g_application.PlayFile(*item, player, bAutoPlay, true, attempt);' in playlist or \
         'g_application.PlayFile(request, player, bAutoPlay, true, attempt);' in playlist
     stack = play[play.index('  if (item.IsStack())'):]

@@ -71,8 +71,10 @@ void CApplicationPlayerCallback::OnPlayBackStarted(const CFileItem& file)
   auto& components = CServiceBroker::GetAppComponents();
   const auto stackHelper = components.GetComponent<CApplicationStackHelper>();
 
-  if (stackHelper->IsPlayingISOStack() || stackHelper->IsPlayingRegularStack())
-    itemCurrentFile = std::make_shared<CFileItem>(*stackHelper->GetRegisteredStack(file));
+  // An item that started for an older request is not a part of the current stack
+  const auto stack = stackHelper->GetRegisteredStack(file);
+  if (stack && (stackHelper->IsPlayingISOStack() || stackHelper->IsPlayingRegularStack()))
+    itemCurrentFile = std::make_shared<CFileItem>(*stack);
   else
     itemCurrentFile = std::make_shared<CFileItem>(file);
 

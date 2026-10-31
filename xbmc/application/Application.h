@@ -264,12 +264,14 @@ protected:
                   const std::string& player,
                   PLAYLIST::Id playlistId,
                   uint64_t intent);
+  struct StagedStack;
   bool PlayStack(CFileItem& item, bool bRestart, uint64_t intent);
   bool StartPlayback(CFileItem item,
                      const std::string& player,
                      bool bRestart,
                      bool playlistItem,
-                     uint64_t intent);
+                     uint64_t intent,
+                     StagedStack* staged = nullptr);
 
   void HandlePortEvents();
 

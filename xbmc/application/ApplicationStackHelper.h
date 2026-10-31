@@ -26,6 +26,11 @@ public:
   ~CApplicationStackHelper() = default;
 
   void Clear();
+  /*!
+  \brief Take over the stack that a request prepared, when the open of the request is accepted.
+  The registrations of the current stack stay until the new stack starts playing.
+  */
+  void Adopt(CApplicationStackHelper&& stack);
   void OnPlayBackStarted(const CFileItem& item);
 
   /*!
