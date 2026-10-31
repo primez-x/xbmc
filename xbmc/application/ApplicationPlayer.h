@@ -50,12 +50,16 @@ public:
   bool PreparePlaybackCleanup();
   bool PlaybackCleanupCompleted() const;
   bool PlaybackCleanupPending() const { return m_cleanupPending; }
-  // Main registers a newer open before resolution or dialogs, which can
-  // process the end or stop notification of the current player.
-  void BeginOpen();
+  // Main registers an open before resolution or dialogs, which can process the
+  // end or stop notification of the current player. EndOpen reports whether an
+  // open reached the player during the registration.
+  uint64_t BeginOpen();
+  bool EndOpen(uint64_t intent);
+  bool IsOpening() const { return !m_openIntents.empty(); }
   // The newest intent before the end or stop notification of the player: a
-  // newer open or an explicit stop. The notification can still report the end.
-  // An intent without an outstanding notification clears the state.
+  // newer open, also during its resolution, or an explicit stop. The
+  // notification can still report the end. An intent without an outstanding
+  // notification clears the state.
   bool OpenRequested() const;
   bool StopRequested() const;
   std::string GetCurrentPlayer() const;
@@ -241,7 +245,16 @@ private:
     OPEN,
     STOP,
   };
+  void Supersede(Supersession supersession);
   Supersession m_supersededBy{Supersession::NONE};
+  uint64_t m_supersededAt{0};
+  uint64_t m_intentSequence{0};
+  struct SOpenIntent
+  {
+    uint64_t sequence;
+    uint64_t openGeneration;
+  };
+  std::vector<SOpenIntent> m_openIntents;
   uint64_t m_openGeneration{0};
   std::optional<uint64_t> m_cleanupGeneration;
   bool m_cleanupPending{false};

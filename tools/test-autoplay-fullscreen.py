@@ -82,7 +82,7 @@ struct CServiceBroker {
 struct Services {CPlayerCoreFactory factory;CPlayerCoreFactory& GetPlayerCoreFactory(){return factory;}};
 struct CApplication {
  CApplicationPlayer player;CApplicationStackHelper stack;CApplicationPowerHandling power;
- Services services;Services* m_ServiceManager=&services;bool m_bStop=false;
+ Services services;Services* m_ServiceManager=&services;bool m_bStop=false,m_playbackCleanupDeferred=false;
  std::shared_ptr<CFileItem> m_itemCurrentFile=std::make_shared<CFileItem>();
  IPlayerCallback callback;
  template<class T>T* GetComponent(){if constexpr(std::is_same_v<T,CApplicationPlayer>)return &player;
@@ -216,7 +216,8 @@ def main():
                 'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
                 'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
                 'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(']
-    signatures+=['bool CApplicationPlayer::HasPendingOpen() const', 'void CApplicationPlayer::BeginOpen()',
+    signatures+=['bool CApplicationPlayer::HasPendingOpen() const', 'uint64_t CApplicationPlayer::BeginOpen()',
+                  'bool CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
                   'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const',
                      'bool CApplicationPlayer::HasPendingVideoOpen() const',
                      'bool CApplicationPlayer::PreparePlaybackCleanup()',
@@ -227,7 +228,7 @@ def main():
     cleanup=function(application,'void CApplication::PlaybackCleanup()')
     ended_body=application[application.index('  case GUI_MSG_PLAYBACK_ENDED:'):application.index('  case GUI_MSG_PLAYLISTPLAYER_STOPPED:')]
     assert ended_body.index('OnPlaybackStopped()')<ended_body.index('PlayNext(1, true)')<ended_body.index('PlaybackCleanup()')
-    playfile=function(application,'bool CApplication::PlayFile(')
+    playfile=function(application,'bool CApplication::StartPlayback(')
     assert 'options.fullscreen = !CServiceBroker::GetPlaylistPlayer().HasPlayedFirstFile()' in playfile
     code=PRELUDE+'\n'.join(function(source,s) for s in signatures)+HARNESS
     code=code.replace('@CONTINUATION@',continuation).replace('@CLEANUP@',cleanup)
@@ -268,9 +269,9 @@ def main():
             needle='  if (m_cleanupGeneration == m_openGeneration && !m_cleanupPending)\n    return false;'
             assert code.count(needle)==1
             run(code.replace(needle,''),'gfx.restores==1')
-            needle='  m_cleanupPending = false;\n  BeginOpen();\n'
+            needle='  m_cleanupPending = false;\n  Supersede(Supersession::OPEN);\n'
             assert code.count(needle)==1
-            run(code.replace(needle,'  BeginOpen();\n'),'!app.player.PlaybackCleanupPending()')
+            run(code.replace(needle,'  Supersede(Supersession::OPEN);\n'),'!app.player.PlaybackCleanupPending()')
             needle='  if (!m_cleanupPending)\n  {'
             assert code.count(needle)==1
             run(code.replace(needle,'  if (true)\n  {'),'old->closes==calls+10')

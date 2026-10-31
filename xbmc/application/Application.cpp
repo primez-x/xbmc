@@ -191,6 +191,7 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 //TODO: XInitThreads
 #ifdef HAVE_X11
@@ -2637,15 +2638,29 @@ bool CApplication::PlayFile(CFileItem item,
                             bool bRestart,
                             bool playlistItem)
 {
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
+  // This open supersedes older intents for the end or stop notification of the
+  // current playback, also during a resolution or a dialog that processes the
+  // notification. Terminal cleanup waits for the outcome of the open.
+  const auto intent = appPlayer->BeginOpen();
+  const bool ret = StartPlayback(std::move(item), player, bRestart, playlistItem);
+  const bool reached = appPlayer->EndOpen(intent);
+  if (!appPlayer->IsOpening() && std::exchange(m_playbackCleanupDeferred, false) && !reached)
+    PlaybackCleanup();
+  return ret;
+}
+
+bool CApplication::StartPlayback(CFileItem item,
+                                 const std::string& player,
+                                 bool bRestart,
+                                 bool playlistItem)
+{
   // Ensure the MIME type has been retrieved for http:// and shout:// streams
   if (item.GetMimeType().empty())
     item.FillInMimeType();
 
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto stackHelper = GetComponent<CApplicationStackHelper>();
-  // This open supersedes an earlier stop for the end or stop notification of
-  // the current playback, also during the resolution or a dialog below.
-  appPlayer->BeginOpen();
   // The end of a file that the playlist does not own must not continue the
   // playlist. A newer open during a resolution or a dialog below can select a
   // playlist again, so the accepted open repeats the reset.
@@ -2968,6 +2983,12 @@ void CApplication::PlaybackCleanup()
   // intentionally carry fullscreen=false to preserve the user's current window.
   if (appPlayer->HasPendingOpen())
     return;
+  // An open that has not reached the player yet decides about the cleanup.
+  if (appPlayer->IsOpening())
+  {
+    m_playbackCleanupDeferred = true;
+    return;
+  }
   const bool cleanup = appPlayer->PreparePlaybackCleanup();
   if (!cleanup && !appPlayer->PlaybackCleanupCompleted())
     return;

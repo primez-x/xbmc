@@ -73,13 +73,16 @@ HARNESS = HARNESS.replace(
     ' struct {void Set(){}} m_playerEvent;int stackPlays=0,m_nextPlaylistItem=0;\n'
     ' void Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem);\n'
     ' std::function<void()> nested;void Accept(bool bRestart,bool playlistItem);\n'
-    ' bool PlayFile(CFileItem item,const std::string& name,bool bRestart=false,bool playlistItem=false){\n'
-    '  ++stackPlays;player.BeginOpen();Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
+    ' bool PlayFile(CFileItem item,const std::string& player,bool bRestart=false,bool playlistItem=false);bool abandon=false;\n'
+    ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem){\n'
+    '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
+    '  if(abandon)return false;\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);Accept(bRestart,playlistItem);return ret;}\n'
     ' bool Ended();\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
+bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bRestart,bool playlistItem){@PLAYFILE@}
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
 void CApplication::Intent(CFileItem item,bool bRestart,bool playlistItem){
@@ -252,6 +255,30 @@ int main(){
   old->canClose=true;app.Frame();app.PlaybackCleanup();
   assert(CServiceBroker::gui.wm.active==HOME&&!app.player.HasPlayer()&&app.player.created==0);
  }
+ // An open that does not reach the player, for example a cancelled Blu-ray
+ // title selection, does not supersede the end of the playback that continues.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->playing=true;
+  app.abandon=true;CFileItem title;title.id=70;assert(!app.PlayFile(title,"old",false,true));
+  assert(!app.player.IsOpening()&&!app.player.HasPendingOpen());
+  old->playing=false;app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(CServiceBroker::playlist.selected==1&&app.player.m_nextItem.pItem->id==9&&CServiceBroker::pvr.ended==1);
+ }
+ // The end of the previous playback during the resolution of the next playlist
+ // item: the terminal cleanup waits for the open, so the item stays fullscreen.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlist.m_iCurrentSong=0;playlist.m_bPlaybackStarted=false;
+  app.nested=[&]{app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.Frame();
+   assert(app.player.IsOpening()&&gfx.fullscreen&&gfx.restores==0);};
+  CFileItem next;next.id=60;assert(app.PlayFile(next,"old",false,true));
+  app.Frame();assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==60);
+  assert(gfx.fullscreen&&gfx.restores==0&&playlist.GetCurrentPlaylist()==TYPE_VIDEO);
+ }
+ // The same, but the item does not reach the player: the waiting cleanup runs.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;
+  app.nested=[&]{app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.Frame();};
+  app.abandon=true;CFileItem next;next.id=60;assert(!app.PlayFile(next,"old",false,true));
+  app.Frame();assert(!app.player.HasPlayer()&&!gfx.fullscreen&&gfx.restores==1);
+ }
  std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
 }
 """
@@ -263,7 +290,8 @@ def main():
                   'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()',
                   'bool CApplicationPlayer::ClosePlayer(', 'void CApplicationPlayer::OnPlaybackStopped()',
                   'void CApplicationPlayer::OpenNext(', 'void CApplicationPlayer::ResetPlayer(',
-                  'bool CApplicationPlayer::OpenFile(', 'bool CApplicationPlayer::HasPendingOpen() const', 'void CApplicationPlayer::BeginOpen()',
+                  'bool CApplicationPlayer::OpenFile(', 'bool CApplicationPlayer::HasPendingOpen() const', 'uint64_t CApplicationPlayer::BeginOpen()',
+                  'bool CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
                   'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const',
                   'bool CApplicationPlayer::HasPendingVideoOpen() const',
                   'bool CApplicationPlayer::PreparePlaybackCleanup()',
@@ -291,7 +319,9 @@ def main():
         'int CPlayListPlayer::GetNextItemIdx(int offset) const', 'void CPlayListPlayer::Reset()',
         'void CPlayListPlayer::ResetCurrentPlaylist()',
         'void CPlayListPlayer::SetCurrentPlaylist(')))
-    play = function(application, 'bool CApplication::PlayFile(')
+    wrapper = function(application, 'bool CApplication::PlayFile(')
+    code = code.replace('@PLAYFILE@', wrapper[wrapper.index('{') + 1:wrapper.rindex('}')])
+    play = function(application, 'bool CApplication::StartPlayback(')
     intent = play.index('  if (!bRestart)\n  {')
     code = code.replace('@INTENT@', play[intent:play.index('\n  }\n', intent) + 4])
     lambda_ = play.index('  const auto endPlaylist = [&]')
@@ -302,7 +332,7 @@ def main():
     stack = play[play.index('  if (item.IsStack())'):]
     assert stack.index('  endPlaylist();') < stack.index('  return true;'), 'accepted stack does not end the playlist'
     # The open registers before the resolution and the dialogs that process messages.
-    assert play.index('  appPlayer->BeginOpen();') < play.index('dir->Resolve(item)'), 'open registers late'
+    assert wrapper.index('appPlayer->BeginOpen();') < wrapper.index('StartPlayback('), 'open registers late'
     # A trailer is a new open: the playlist and the stack of the movie end.
     trailer = application[application.index('  case GUI_MSG_PLAY_TRAILER:'):]
     trailer = trailer[:trailer.index('    break;')]

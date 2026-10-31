@@ -19,6 +19,7 @@
 #include "settings/SettingsComponent.h"
 #include "threads/Event.h"
 
+#include <algorithm>
 #include <mutex>
 
 using namespace std::chrono_literals;
@@ -38,9 +39,7 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()
 bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> completion)
 {
   m_shutdown = m_shutdown || shutdown;
-  // Only a notification that has not arrived yet can be superseded. Without
-  // one, no state outlives this intent.
-  m_supersededBy = m_waitForPlaybackStop ? Supersession::STOP : Supersession::NONE;
+  Supersede(Supersession::STOP);
   m_nextItem.pItem.reset();
   ResetPlayer(std::move(completion));
   return !GetInternal();
@@ -164,7 +163,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   // cleanup of the previous player. Main still owns its close continuation.
   ++m_openGeneration;
   m_cleanupPending = false;
-  BeginOpen();
+  Supersede(Supersession::OPEN);
   const std::string newPlayer = playerName.empty() ? factory.GetDefaultPlayer(item) : playerName;
   auto player = GetInternal();
   const bool replace = player &&
@@ -193,7 +192,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   bool ret = player->OpenFile(item, options);
   m_waitForPlaybackStop = ret;
   // No intent supersedes the notification of the new playback yet.
-  m_supersededBy = Supersession::NONE;
+  Supersede(Supersession::NONE);
 
   m_nextItem.pItem.reset();
 
@@ -205,21 +204,42 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   return ret;
 }
 
-void CApplicationPlayer::BeginOpen()
+uint64_t CApplicationPlayer::BeginOpen()
+{
+  m_openIntents.push_back({++m_intentSequence, m_openGeneration});
+  return m_intentSequence;
+}
+
+bool CApplicationPlayer::EndOpen(uint64_t intent)
+{
+  const auto open = std::find_if(m_openIntents.begin(), m_openIntents.end(),
+                                 [intent](const auto& open) { return open.sequence == intent; });
+  if (open == m_openIntents.end())
+    return false;
+  const bool reached{open->openGeneration != m_openGeneration};
+  m_openIntents.erase(open);
+  return reached;
+}
+
+void CApplicationPlayer::Supersede(Supersession supersession)
 {
   // Only a notification that has not arrived yet can be superseded. Without
   // one, no state outlives this intent.
-  m_supersededBy = m_waitForPlaybackStop ? Supersession::OPEN : Supersession::NONE;
+  m_supersededBy = m_waitForPlaybackStop ? supersession : Supersession::NONE;
+  m_supersededAt = ++m_intentSequence;
 }
 
 bool CApplicationPlayer::OpenRequested() const
 {
-  return m_supersededBy == Supersession::OPEN;
+  // An open that has not reached the player supersedes older intents only.
+  return m_supersededBy == Supersession::OPEN ||
+         (!m_openIntents.empty() && m_openIntents.back().sequence > m_supersededAt);
 }
 
 bool CApplicationPlayer::StopRequested() const
 {
-  return m_supersededBy == Supersession::STOP;
+  return m_supersededBy == Supersession::STOP &&
+         (m_openIntents.empty() || m_openIntents.back().sequence < m_supersededAt);
 }
 
 bool CApplicationPlayer::HasPendingOpen() const

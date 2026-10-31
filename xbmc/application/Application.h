@@ -247,6 +247,8 @@ protected:
   bool m_bInitializing = true;
 
   int m_nextPlaylistItem = -1;
+  // Terminal cleanup waits for the outcome of an open that has not reached the player.
+  bool m_playbackCleanupDeferred{false};
 
   std::chrono::time_point<std::chrono::steady_clock> m_lastRenderTime;
   bool m_skipGuiRender = false;
@@ -254,6 +256,7 @@ protected:
   std::unique_ptr<MUSIC_INFO::CMusicInfoScanner> m_musicInfoScanner;
 
   bool PlayStack(CFileItem& item, bool bRestart);
+  bool StartPlayback(CFileItem item, const std::string& player, bool bRestart, bool playlistItem);
 
   void HandlePortEvents();
 
