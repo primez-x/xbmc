@@ -3185,11 +3185,6 @@ bool CAMLCodec::DrainHevcStill(float bufferLevel)
   auto& still = m_stillFrameDrain;
   if (!m_hints.stills || m_hints.codec != AV_CODEC_ID_HEVC || still.pictureEmitted)
     return false;
-  if (m_abort)
-  {
-    still.state = State::DONE;
-    return false;
-  }
 
   const auto now = std::chrono::steady_clock::now();
   if (still.state == State::IDLE)
@@ -3538,6 +3533,11 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture& videoPicture)
       m_repairExcursionRun = 0;
       return CDVDVideoCodec::VC_EOF;
     }
+
+    // A flush discards the remaining pictures. A wait for them up to the drain
+    // timeout held the flush of a seek.
+    if (m_abort)
+      return CDVDVideoCodec::VC_BUFFER;
 
     if (DrainHevcStill(buffer_level))
       return CDVDVideoCodec::VC_NONE;
