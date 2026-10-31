@@ -14,9 +14,11 @@
 #include "threads/Thread.h"
 #include "utils/logtypes.h"
 
+#include <atomic>
 #include <memory>
 #include <string>
 
+class CEvent;
 class PLT_MediaController;
 
 namespace UPNP
@@ -56,6 +58,7 @@ public:
 
 private:
   bool IsPaused() const;
+  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -69,7 +72,8 @@ private:
   std::string m_current_uri;
   std::string m_current_meta;
   bool m_started = false;
-  bool m_stopremote = false;
+  std::atomic<bool> m_stopremote{false};
+  std::atomic<bool> m_closed{false};
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;
