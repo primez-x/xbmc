@@ -457,6 +457,17 @@ int main(){
   assert(playlist.list.unplayable==1&&app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);
   assert(gfx.fullscreen&&gfx.restores==0);
  }
+ // A restart of the current playback (TMSG_MEDIA_RESTART) during the failure
+ // dialog is a newer open: the failed attempt keeps the playlist.
+ {CApplication app;begin(app);reset();playlist(app);
+  auto old=app.player.m_pPlayer;old->canClose=true;old->playing=true;old->hasVideo=true;
+  auto& playlist=CServiceBroker::playlist;playlistRetries=1;playlist.SetCurrentPlaylist(TYPE_VIDEO);
+  app.nested=[&]{app.abandon=true;};
+  failureDialog=[&]{CFileItem current;current.id=30;assert(app.PlayFile(current,"old",true));};
+  assert(!playlist.Play(0,"old"));playlistRetries=100;failureDialog={};
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==30&&!app.player.m_closingPlayer);
+ }
  // A newer open supersedes every older open still in progress, whatever
  // started the older open: the next item that the end of A started,
  {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
