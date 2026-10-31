@@ -336,6 +336,28 @@ int main(){
   app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==60&&gfx.fullscreen);
  }
+ // The same during a newer playlist item, after the old end was acknowledged:
+ // the playlist stays for the item, and the item continues the playlist.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;auto& playlist=CServiceBroker::playlist;
+  playlist.m_iCurrentSong=0;playlist.m_bPlaybackStarted=false;
+  app.nested=[&]{app.PlaylistStopped();
+   assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&!app.player.StopRequested()&&app.player.m_closingPlayer);};
+  CFileItem item;item.id=60;assert(app.PlayFile(item,"old",false,true));
+  app.player.OnPlaybackStopped();playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);
+  old->canClose=true;app.Frame();
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&app.player.m_pPlayer->lastItem==60);
+  app.player.m_pPlayer->playing=false;app.Ended();
+  assert(playlist.selected==1&&app.player.HasPendingOpen());
+ }
+ // During a deferred play, the screensaver stops its own video: that stop
+ // cancels no open. A stop request through the same message does.
+ for(bool deferred:{true,false}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{playlist.m_bIsDeferredPlayPending=deferred;playlist.StopMessage(TYPE_NONE);
+   playlist.m_bIsDeferredPlayPending=false;app.player.OnPlaybackStopped();app.Frame();};
+  CFileItem next;next.id=60;assert(app.PlayFile(next,"old",false,false)==deferred);
+  assert(deferred==(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==60));
+ }
  // A stop without playback during a resolution cancels the open too. A stop
  // before an open does not cancel the open.
  {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;app.StopPlaying();
@@ -382,6 +404,24 @@ int main(){
   playlist.SetCurrentPlaylist(TYPE_VIDEO);app.player.failCreate=true;
   assert(!playlist.Play(0,"old"));assert(playlist.list.unplayable==2);
  }
+ // The end of A starts the next item B. A stop cancels B, and the user opens C
+ // during B's resolution: the end of A does not close C.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  app.nested=[&]{app.StopPlaying();app.Frame();CFileItem c;c.id=50;assert(app.PlayFile(c,"old",false,false));
+   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50);};
+  old->playing=false;app.Ended();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.m_closingPlayer);
+ }
+ // The end of A during the resolution of item B; B fails, and the playlist
+ // continues at C: the waiting cleanup does not leave fullscreen before C.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.Frame();
+   assert(app.m_playbackCleanupDeferred);app.abandon=true;};
+  playlist.SetCurrentPlaylist(TYPE_VIDEO);assert(playlist.Play(0,"old"));app.Frame();
+  assert(playlist.list.unplayable==1&&app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);
+  assert(gfx.fullscreen&&gfx.restores==0);
+ }
  std::cout<<"PASS production playlist Play: a stop cancels an item without a failure\n";
 }
 """
@@ -390,7 +430,7 @@ int main(){
 def production_play(code, playlist, extract):
     """Swap the recording Play for the production Play and its failure handling."""
     code = code[:code.index('int main(){')]
-    code = code.replace('#include <cassert>', '#include <cassert>\n#include <chrono>')
+    code = code.replace('#include <cassert>', '#include <cassert>\n#include <chrono>\n#include "' + str(ROOT / 'xbmc/utils/ScopeGuard.h') + '"')
     code = code.replace('struct CFileItem {', """struct Tag {};
 struct CFileItem {
  void SetProperty(const char*,bool){}void ClearProperty(const char*){}void SetDetectorBinding(std::shared_ptr<int>){}
@@ -411,6 +451,9 @@ struct CPlayList {
  bool Expand(int){return false;}CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?items[n]:nullptr;}
  void SetPlayed(bool){}void SetUnPlayable(int){++unplayable;}void Clear(){items.clear();}
 };""")
+    # An abandoned resolution fails one item only
+    assert code.count('  if(abandon)return false;') == 1
+    code = code.replace('  if(abandon)return false;', '  if(std::exchange(abandon,false))return false;')
     code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
     code = code.replace('const CPlayList& GetPlaylist(int)const{return list;}',
                         'const CPlayList& GetPlaylist(int)const{return list;} CPlayList& GetPlaylist(int){return list;}')
@@ -466,7 +509,7 @@ def main():
     code = code.replace('@CONTINUATION@', frame[frame.index('  const bool openingVideo ='):
                                                  frame.index('  // this will go away')])
     code = code.replace('@CLEANUP@', function(application, 'void CApplication::PlaybackCleanup()'))
-    code = code.replace('@STOP@', function(application, 'void CApplication::StopPlaying(') + '\n' + function(application, 'void CApplication::StopPlayer('))
+    code = code.replace('@STOP@', function(application, 'void CApplication::StopPlaying('))
     stop = function(playlist, '  case TMSG_MEDIA_STOP:')
     code = code.replace('@MEDIASTOP@', stop[stop.index('{') + 1:-1])
     stop = application[application.index('  case GUI_MSG_PLAYLISTPLAYER_STOPPED:'):

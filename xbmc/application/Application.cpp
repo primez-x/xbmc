@@ -3106,27 +3106,20 @@ bool CApplication::IsFullScreen()
 
 void CApplication::StopPlaying(std::shared_ptr<CEvent> completion)
 {
-  StopPlayer(std::move(completion), true);
-}
-
-void CApplication::StopPlayer(std::shared_ptr<CEvent> completion, bool cancelOpens)
-{
   CGUIComponent *gui = CServiceBroker::GetGUI();
 
   if (gui)
   {
     int iWin = gui->GetWindowManager().GetActiveWindow();
     const auto appPlayer = GetComponent<CApplicationPlayer>();
-    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() ||
-        (cancelOpens && appPlayer->IsOpening()))
+    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
     {
       appPlayer->ClosePlayer(false, std::move(completion));
-      if (cancelOpens)
-        appPlayer->CancelOpens();
+      appPlayer->CancelOpens();
       // Without an end or stop notification to come, for example after the stop
       // of a queued playlist item, no notification ends the playlist. A playlist
       // item that the stop cancels does not continue the playlist.
-      if (!appPlayer->StopRequested() || (cancelOpens && appPlayer->IsOpening()))
+      if (!appPlayer->StopRequested() || appPlayer->IsOpening())
         CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
 
       // turn off visualisation window when stopping
@@ -3423,7 +3416,11 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
     if (!superseded && !isEpgPlaylistItem)
     {
-      if (!CServiceBroker::GetPlaylistPlayer().PlayNext(1, true))
+      // An open during the resolution of the next item, for example after a
+      // stop that cancelled the item, owns the player
+      const auto generation = appPlayer->GetOpenGeneration();
+      if (!CServiceBroker::GetPlaylistPlayer().PlayNext(1, true) &&
+          appPlayer->GetOpenGeneration() == generation)
         appPlayer->ClosePlayer();
 
       PlaybackCleanup();
@@ -3443,10 +3440,13 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
   case GUI_MSG_PLAYLISTPLAYER_STOPPED:
     ResetCurrentItem();
-    // The end of the playlist can arrive during a newer open, which continues
-    if (GetComponent<CApplicationPlayer>()->HasPlayer() ||
-        GetComponent<CApplicationPlayer>()->HasPendingOpen())
-      StopPlayer({}, false);
+    // The end of the playlist can arrive during a newer open. The newer open
+    // owns the playlist and the intents; only the old player stops.
+    if (GetComponent<CApplicationPlayer>()->IsOpening())
+      GetComponent<CApplicationPlayer>()->ResetPlayer();
+    else if (GetComponent<CApplicationPlayer>()->HasPlayer() ||
+             GetComponent<CApplicationPlayer>()->HasPendingOpen())
+      StopPlaying();
     PlaybackCleanup();
     return true;
 

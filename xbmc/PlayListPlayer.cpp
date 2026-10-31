@@ -32,6 +32,7 @@
 #include "playlists/PlayList.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/ScopeGuard.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
@@ -369,13 +370,14 @@ bool CPlayListPlayer::Play(int iSong,
   m_bPlaybackStarted = false;
 
   const auto playAttempt = std::chrono::steady_clock::now();
-  // A stop cancels the attempt; a cancelled attempt is not a failed item
+  // A stop cancels the attempt; a cancelled attempt is not a failed item. The
+  // attempt lasts until the failure handling started the next item.
   const auto appPlayer =
       CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
-  const auto intent = appPlayer->BeginOpen();
+  const KODI::UTILS::CScopeGuard<uint64_t, 0, void(uint64_t)> attempt(
+      [&](uint64_t intent) { g_application.EndOpen(intent); }, appPlayer->BeginOpen());
   bool ret = g_application.PlayFile(*item, player, bAutoPlay, true);
-  const bool cancelled = appPlayer->OpenCancelled(intent);
-  g_application.EndOpen(intent);
+  const bool cancelled = appPlayer->OpenCancelled(attempt);
   // OpenFile can release GUI ownership while Python changes the playlist.
   const auto selectionIsCurrent = [&]() {
     return m_iCurrentPlayList.load() == playlistId &&
@@ -1158,16 +1160,17 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     wakeScreensaver();
 
     // A replacement can remain queued even after the original player retires.
-    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
+    // A stop request cancels the opens in progress (StopPlaying). During a
+    // deferred play, the screensaver stops its own video; that stop cancels nothing.
+    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() ||
+        (!m_bIsDeferredPlayPending && appPlayer->IsOpening()))
     {
       auto completion = pMsg->DeferCompletion();
       if (m_bIsDeferredPlayPending)
       {
         appPlayer->ClosePlayer(false, std::move(completion));
-        appPlayer->CancelOpens();
         // Without an end or stop notification to come, the stop ends the playlist.
-        // A playlist item that the stop cancels does not continue the playlist.
-        if (!appPlayer->StopRequested() || appPlayer->IsOpening())
+        if (!appPlayer->StopRequested())
           ResetCurrentPlaylist();
       }
       else

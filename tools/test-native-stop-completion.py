@@ -288,7 +288,7 @@ def build(baseline=None):
     harness=harness.replace('constexpr int TYPE_NONE=0,TYPE_PICTURE=1,TYPE_VIDEO=2,TYPE_MUSIC=3;',
                             'constexpr int TYPE_NONE=-1,TYPE_PICTURE=2,TYPE_VIDEO=1,TYPE_MUSIC=0;')
     harness=harness.replace('@CONTINUATION@',continuation).replace('@CLEANUP@',function(application,'void CApplication::PlaybackCleanup()'))
-    harness=harness.replace('@STOP@',function(application,'void CApplication::StopPlaying(')+'\n'+function(application,'void CApplication::StopPlayer('))
+    harness=harness.replace('@STOP@',function(application,'void CApplication::StopPlaying('))
     playlist=source('xbmc/PlayListPlayer.cpp')
     stop=function(playlist,'  case TMSG_MEDIA_STOP:')
     stop=stop[stop.index('{')+1:-1]

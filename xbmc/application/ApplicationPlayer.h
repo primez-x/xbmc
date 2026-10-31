@@ -62,6 +62,8 @@ public:
   // The player plays the video item of the last open. The player can report the
   // video stream later.
   bool IsPlayingOpenedVideo() const;
+  // Every open that reaches OpenFile advances the generation
+  uint64_t GetOpenGeneration() const { return m_openGeneration; }
   // The newest intent before the end or stop notification of the player: a
   // newer open, also during its resolution, or an explicit stop. The
   // notification can still report the end. An intent without an outstanding

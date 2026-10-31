@@ -87,7 +87,7 @@ struct CApplication {
  IPlayerCallback callback;
  template<class T>T* GetComponent(){if constexpr(std::is_same_v<T,CApplicationPlayer>)return &player;
  else if constexpr(std::is_same_v<T,CApplicationStackHelper>)return &stack;else return &power;}
- void PlaybackCleanup();void StopPlaying(std::shared_ptr<CEvent> = {});void StopPlayer(std::shared_ptr<CEvent>,bool);bool PlaylistStopped();void ResetCurrentItem(){}
+ void PlaybackCleanup();void StopPlaying(std::shared_ptr<CEvent> = {});bool PlaylistStopped();void ResetCurrentItem(){}
  void Frame(){auto appPlayer=&player;appPlayer->ContinueClose();@CONTINUATION@}
 };
 bool CPlayListPlayer::Play(int,const std::string& name,bool){
@@ -233,7 +233,7 @@ def main():
     assert 'options.fullscreen = !CServiceBroker::GetPlaylistPlayer().HasPlayedFirstFile()' in playfile
     code=PRELUDE+'\n'.join(function(source,s) for s in signatures)+HARNESS
     code=code.replace('@CONTINUATION@',continuation).replace('@CLEANUP@',cleanup)
-    code=code.replace('@STOP@',function(application,'void CApplication::StopPlaying(')+'\n'+function(application,'void CApplication::StopPlayer('))
+    code=code.replace('@STOP@',function(application,'void CApplication::StopPlaying('))
     playlist=(ROOT/'xbmc/PlayListPlayer.cpp').read_text()
     stop=function(playlist,'  case TMSG_MEDIA_STOP:')
     code=code.replace('@MEDIASTOP@',stop[stop.index('{')+1:-1])
@@ -284,10 +284,10 @@ def main():
             run(code.replace(needle,'  if (!cleanup)'),
                 'CServiceBroker::gui.wm.active==HOME&&app.stack.clears==1')
             needles=('if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())',
-                     'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() ||\n        (cancelOpens')
+                     'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() ||\n        (!m_bIsDeferredPlayPending')
             assert all(code.count(needle)==1 for needle in needles)
             run(code.replace(needles[0],'if (appPlayer->HasPlayer() || appPlayer->IsOpening())')
-                .replace(needles[1],'if (appPlayer->HasPlayer() ||\n        (cancelOpens'),'!app.player.HasPendingOpen()')
+                .replace(needles[1],'if (appPlayer->HasPlayer() ||\n        (!m_bIsDeferredPlayPending'),'!app.player.HasPendingOpen()')
 
 
 if __name__=='__main__':main()
