@@ -136,7 +136,11 @@ public:
                                PLAYLIST::CPlayList& playlist,
                                PLAYLIST::Id playlistId,
                                int track = 0);
-  bool PlayFile(CFileItem item, const std::string& player, bool bRestart = false);
+  // A new open (bRestart false) that is not a playlist item ends the playlist.
+  bool PlayFile(CFileItem item,
+                const std::string& player,
+                bool bRestart = false,
+                bool playlistItem = false);
   void StopPlaying(std::shared_ptr<CEvent> completion = {});
   void Restart(bool bSamePosition = true);
   void DelayedPlayerRestart();

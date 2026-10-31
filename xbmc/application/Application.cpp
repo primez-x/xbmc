@@ -2632,7 +2632,10 @@ bool CApplication::PlayStack(CFileItem& item, bool bRestart)
   return PlayFile(selectedStackPart, "", true);
 }
 
-bool CApplication::PlayFile(CFileItem item, const std::string& player, bool bRestart)
+bool CApplication::PlayFile(CFileItem item,
+                            const std::string& player,
+                            bool bRestart,
+                            bool playlistItem)
 {
   // Ensure the MIME type has been retrieved for http:// and shout:// streams
   if (item.GetMimeType().empty())
@@ -2648,6 +2651,15 @@ bool CApplication::PlayFile(CFileItem item, const std::string& player, bool bRes
 
     m_nextPlaylistItem = -1;
     stackHelper->Clear();
+
+    // The end of a file that the playlist does not own must not continue the
+    // playlist. The playlist stop notification would close the player.
+    auto& playlistPlayer = CServiceBroker::GetPlaylistPlayer();
+    if (!playlistItem && playlistPlayer.GetCurrentPlaylist() != PLAYLIST::TYPE_NONE)
+    {
+      playlistPlayer.Reset();
+      playlistPlayer.SetCurrentPlaylist(PLAYLIST::TYPE_NONE);
+    }
 
     if (item.IsVideo())
       CUtil::ClearSubtitles();
@@ -3261,6 +3273,10 @@ bool CApplication::OnMessage(CGUIMessage& message)
       }
       else
       {
+        // The trailer opens as a restart, which keeps the playlist. The end of the
+        // trailer must not continue the playlist.
+        CServiceBroker::GetPlaylistPlayer().Reset();
+        CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(PLAYLIST::TYPE_NONE);
         CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 1, 0,
                                                    static_cast<void*>(trailerItem.release()));
       }
@@ -3295,13 +3311,15 @@ bool CApplication::OnMessage(CGUIMessage& message)
 #ifdef HAS_LIBAMCODEC
     PLAYBACK_DIAGNOSTICS::endDisplay.Begin(PLAYBACK_DIAGNOSTICS::NowUs(), "ended");
 #endif
-    GetComponent<CApplicationPlayer>()->OnPlaybackStopped();
-    // A newer open waits until this player retires. The end of the replaced
-    // playback must not continue the stack, the playlist or the EPG autoplay,
-    // or close the player: each of these drops or replaces the newer open. For
-    // the PVR, the newer open stopped the playback.
-    const bool replaced{GetComponent<CApplicationPlayer>()->HasPendingOpen()};
-    if (replaced)
+    const auto appPlayer = GetComponent<CApplicationPlayer>();
+    appPlayer->OnPlaybackStopped();
+    // A newer open or an explicit stop that came before this notification
+    // supersedes the end. The end then must not continue the stack, the
+    // playlist or the EPG autoplay: each of these drops or replaces the newer
+    // open, or restarts the stopped playback. For the PVR, the newer intent
+    // stopped the playback.
+    const bool superseded{appPlayer->HasPendingOpen() || appPlayer->StopRequested()};
+    if (superseded)
       CServiceBroker::GetPVRManager().OnPlaybackStopped(*m_itemCurrentFile);
     else
       CServiceBroker::GetPVRManager().OnPlaybackEnded(*m_itemCurrentFile);
@@ -3313,7 +3331,7 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
     m_playerEvent.Set();
     const auto stackHelper = GetComponent<CApplicationStackHelper>();
-    if (!replaced && stackHelper->IsPlayingRegularStack() &&
+    if (!superseded && stackHelper->IsPlayingRegularStack() &&
         stackHelper->HasNextStackPartFileItem())
     { // just play the next item in the stack
       PlayFile(stackHelper->SetNextStackPartCurrentFileItem(), "", true);
@@ -3326,11 +3344,16 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
     ResetCurrentItem();
 
-    if (!replaced && !isEpgPlaylistItem)
+    if (!superseded && !isEpgPlaylistItem)
     {
       if (!CServiceBroker::GetPlaylistPlayer().PlayNext(1, true))
-        GetComponent<CApplicationPlayer>()->ClosePlayer();
+        appPlayer->ClosePlayer();
 
+      PlaybackCleanup();
+    }
+    else if (superseded)
+    {
+      // A stopped playback needs the terminal cleanup. A newer open skips the cleanup.
       PlaybackCleanup();
     }
 

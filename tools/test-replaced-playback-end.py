@@ -24,7 +24,7 @@ HARNESS = autoplay['HARNESS']
 HARNESS = HARNESS[:HARNESS.index('static void ended(')]
 HARNESS = HARNESS.replace(
     ' void SendThreadMessage(CGUIMessage&){}',
-    ' int threadMessages=0;void SendThreadMessage(CGUIMessage&){++threadMessages;}')
+    ' void SendMessage(CGUIMessage&){}int threadMessages=0;void SendThreadMessage(CGUIMessage&){++threadMessages;}')
 HARNESS = HARNESS.replace(
     'struct CApplicationStackHelper {int clears=0;void Clear(){++clears;}};',
     'struct CApplicationStackHelper {int clears=0;bool regular=false,next=false;void Clear(){++clears;}'
@@ -45,16 +45,46 @@ HARNESS = HARNESS.replace(
     ' static inline Params params;static inline PVR pvr;static inline Announcements announcements;\n'
     ' static PVR& GetPVRManager(){return pvr;}static Announcements* GetAnnouncementManager(){return &announcements;}\n')
 HARNESS = HARNESS.replace(
-    ' bool Play(int,const std::string&,bool);',
-    ' bool m_bPlaybackStarted=true;bool Stopped();\n bool Play(int,const std::string&,bool);')
+    'struct CGUIMessage {CGUIMessage(int,int,int,int,int){}};',
+    'struct CGUIMessage {int id;CGUIMessage(int id,int,int,int=0,int=0):id(id){}int GetMessage()const{return id;}};')
+HARNESS = HARNESS.replace('struct Party {', 'struct Party {bool IsEnabled()const{return false;}')
+# The playlist state, its reset, its next index and its terminal handlers are production code.
+PLAYLIST_PLAYER = HARNESS[HARNESS.index('struct CPlayListPlayer {'):HARNESS.index('struct CServiceBroker {')]
+HARNESS = HARNESS.replace(PLAYLIST_PLAYER, r"""constexpr int GUI_MSG_PLAYLIST_CHANGED=10;
+struct Cell {int value;Cell(int v=0):value(v){}int load()const{return value;}operator int()const{return value;}
+ Cell& operator=(int v){value=v;return *this;}};
+struct CUtil {static void ClearSubtitles(){}};
+struct CPlayListPlayer {
+ bool m_bIsDeferredPlayPending=false;void StopMessage(int);void MediaPlay(CFileItem*,int);
+ Cell m_iCurrentPlayList=TYPE_VIDEO,m_iCurrentSong=0;bool m_bPlayedFirstFile=true,m_bPlaybackStarted=true;
+ int selected=-1;CPlayList list;CApplication* app=nullptr;
+ int GetNextItemIdx(int)const;const CPlayList& GetPlaylist(int)const{return list;}
+ bool RepeatedOne(int)const{return false;}bool Repeated(int)const{return false;}
+ void Reset();void SetCurrentPlaylist(int);int GetCurrentPlaylist(){return m_iCurrentPlayList;}
+ bool Terminal(int);bool Play(int,const std::string&,bool);bool PlayNext(int offset=1,bool bAutoPlay=true);
+};
+""")
+HARNESS = HARNESS.replace(
+    'bool CPlayListPlayer::Play(int,const std::string& name,bool){',
+    'bool CPlayListPlayer::Play(int index,const std::string& name,bool){\n'
+    ' selected=index;m_iCurrentSong=index;m_bPlaybackStarted=false;')
 HARNESS = HARNESS.replace(
     ' void Frame(){',
-    ' struct {void Set(){}} m_playerEvent;int stackPlays=0;\n'
-    ' bool PlayFile(CFileItem,const std::string&,bool){++stackPlays;return true;}\n'
+    ' struct {void Set(){}} m_playerEvent;int stackPlays=0,m_nextPlaylistItem=0;\n'
+    ' void Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem);\n'
+    ' bool PlayFile(CFileItem item,const std::string& name,bool bRestart=false,bool playlistItem=false){\n'
+    '  ++stackPlays;Intent(item,bRestart,playlistItem);return player.OpenFile(item,{},services.factory,name,callback);}\n'
     ' bool Ended();\n void Frame(){')
+PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
+@PLAYLISTFUNCTIONS@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
-bool CPlayListPlayer::Stopped(){switch(GUI_MSG_PLAYBACK_STOPPED){@PLAYLISTSTOPPED@}return false;}
+bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
+void CApplication::Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem){
+ const auto appPlayer=&player;const auto stackHelper=&stack;@INTENT@}
+void CPlayListPlayer::MediaPlay(CFileItem* payload,int restart){
+ auto& g_application=*app;struct {void* lpVoid;int param1,param2;} message{payload,restart,0};auto* pMsg=&message;
+ @MEDIAPLAY@}
 static void reset(){CServiceBroker::pvr={};CServiceBroker::announcements={};}
 // The old playback has ended, and the player still closes when the user opens a newer file.
 static void replace(CApplication& app){
@@ -77,15 +107,17 @@ int main(){
   opensLatest(app,old);
  }
  // A normal end still continues the playlist and the EPG autoplay.
- {CApplication app;begin(app);reset();app.Ended();
+ {CApplication app;begin(app);reset();app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
   assert(CServiceBroker::pvr.ended==1&&CServiceBroker::pvr.stopped==0);
-  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==9);}
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==9);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);}
  {CApplication app;begin(app);reset();app.stack.regular=app.stack.next=true;app.Ended();
   assert(app.stackPlays==1);}
  // The stop of the replaced playback does not stop the playlist under the newer open.
- {CApplication app;begin(app);auto old=app.player.m_pPlayer;replace(app);
+ {CApplication app;begin(app);auto old=app.player.m_pPlayer;CFileItem latest;latest.id=42;
+  app.Intent(latest,true,false);replace(app);
   app.player.OnPlaybackStopped();
-  CServiceBroker::playlist.Stopped();
+  CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);
   const int messages=CServiceBroker::gui.wm.threadMessages;
   if(messages)app.PlaylistStopped();
   assert(messages==0&&CServiceBroker::playlist.m_iCurrentPlayList!=TYPE_NONE);
@@ -94,11 +126,74 @@ int main(){
  // An explicit stop still ends the playlist and the pending open.
  {CApplication app;begin(app);auto old=app.player.m_pPlayer;replace(app);app.StopPlaying();
   assert(!app.player.HasPendingOpen());app.player.OnPlaybackStopped();
-  assert(CServiceBroker::playlist.Stopped());
+  assert(CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED));
   assert(CServiceBroker::gui.wm.threadMessages==1&&CServiceBroker::playlist.m_iCurrentPlayList==TYPE_NONE);
   old->canClose=true;app.Frame();assert(app.player.created==0);
  }
- std::cout<<"PASS replaced playback end and stop keep the newer open; normal end, stack and explicit stop unchanged\n";
+ // A standalone open ends the playlist when the open starts. Neither the end or
+ // stop of the replaced playback nor the end of the standalone file continues
+ // the playlist, and the playlist stop does not drop the standalone open.
+ for(bool oldEnded:{false,true}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  CFileItem latest;latest.id=42;app.Intent(latest,false,false);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_NONE);
+  replace(app);
+  if(oldEnded){app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);}
+  else{app.player.OnPlaybackStopped();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);}
+  assert(CServiceBroker::gui.wm.threadMessages==0&&app.player.HasPendingOpen());
+  opensLatest(app,old);
+  app.player.m_pPlayer->playing=false;app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(CServiceBroker::playlist.selected==-1&&!app.player.HasPendingOpen());
+ }
+ // The playlist's own open and a restart keep the playlist and its position.
+ for(bool restart:{false,true}){CApplication app;begin(app);CServiceBroker::playlist.m_iCurrentSong=1;
+  CFileItem item;item.id=9;app.Intent(item,restart,!restart);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::playlist.m_iCurrentSong==1);
+ }
+ // A single-item media message ends the playlist. A stack part seek uses the
+ // same message as a restart and keeps the playlist position.
+ for(int restart:{0,1}){CApplication app;begin(app);CServiceBroker::playlist.m_iCurrentSong=1;
+  auto* item=new CFileItem;item->id=50;CServiceBroker::playlist.MediaPlay(item,restart);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==(restart?TYPE_VIDEO:TYPE_NONE));
+  assert(!restart||CServiceBroker::playlist.m_iCurrentSong==1);
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==50);
+ }
+ // An explicit stop after the old playback reached the end, also after a newer
+ // open: the late end does not continue the stack, the playlist or the EPG
+ // autoplay, and ends the playlist like a stop.
+ for(int kind:{0,1,2})for(bool replaced:{false,true}){CApplication app;begin(app);reset();
+  auto old=app.player.m_pPlayer;
+  app.m_itemCurrentFile->epg=kind==1;app.stack.regular=app.stack.next=kind==2;
+  if(replaced)replace(app);
+  app.StopPlaying();assert(!app.player.HasPendingOpen());
+  app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(!app.player.HasPendingOpen()&&app.stackPlays==0&&CServiceBroker::playlist.selected==-1);
+  assert(CServiceBroker::pvr.ended==0&&CServiceBroker::pvr.stopped==1);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_NONE&&CServiceBroker::gui.wm.threadMessages==1);
+  old->canClose=true;app.Frame();assert(app.player.created==0&&!app.player.HasPlayer());
+ }
+ // An explicit stop during the open of a playlist item ends the playlist.
+ {CApplication app;begin(app);
+  assert(CServiceBroker::playlist.PlayNext(1,false)&&app.player.HasPendingOpen());
+  app.StopPlaying();app.player.OnPlaybackStopped();
+  assert(CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED));
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_NONE&&CServiceBroker::gui.wm.threadMessages==1);
+ }
+ // A newer open after the stop wins: the late end keeps the newer open and the playlist.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  app.StopPlaying();assert(CServiceBroker::playlist.PlayNext(1,false));
+  app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==9&&CServiceBroker::pvr.stopped==1);
+  assert(CServiceBroker::playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);
+  old->canClose=true;app.Frame();assert(app.player.created==1&&app.player.m_pPlayer->lastItem==9);
+ }
+ // An earlier stop does not affect the end of a later playback.
+ {CApplication app;begin(app);auto old=app.player.m_pPlayer;app.StopPlaying();app.player.OnPlaybackStopped();
+  CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);old->canClose=true;app.Frame();
+  CServiceBroker::playlist.SetCurrentPlaylist(TYPE_VIDEO);assert(CServiceBroker::playlist.Play(0,"old",false));
+  assert(app.player.IsPlaying());app.player.m_pPlayer->playing=false;app.Ended();
+  assert(CServiceBroker::playlist.selected==1&&app.player.HasPendingOpen());
+ }
+ std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
 }
 """
 
@@ -129,11 +224,21 @@ def main():
     code = code.replace('@PLAYNEXT@', function(playlist, 'bool CPlayListPlayer::PlayNext('))
     code = code.replace('@ENDED@', application[application.index('  case GUI_MSG_PLAYBACK_ENDED:'):
                                                application.index('  case GUI_MSG_PLAYLISTPLAYER_STOPPED:')])
-    code = code.replace('@PLAYLISTSTOPPED@', playlist[playlist.index('  case GUI_MSG_PLAYBACK_STOPPED:'):
-                                                      playlist.index('  case GUI_MSG_PLAYBACK_STARTED:')])
+    terminal = min(playlist.find(case) for case in ('  case GUI_MSG_PLAYBACK_ENDED:', '  case GUI_MSG_PLAYBACK_STOPPED:')
+                   if case in playlist)
+    code = code.replace('@PLAYLISTTERMINAL@', playlist[terminal:playlist.index('  case GUI_MSG_PLAYBACK_STARTED:')])
+    code = code.replace('@PLAYLISTFUNCTIONS@', '\n'.join(function(playlist, s) for s in (
+        'int CPlayListPlayer::GetNextItemIdx(int offset) const', 'void CPlayListPlayer::Reset()',
+        'void CPlayListPlayer::SetCurrentPlaylist(')))
+    play = function(application, 'bool CApplication::PlayFile(')
+    intent = play.index('  if (!bRestart)\n  {')
+    code = code.replace('@INTENT@', play[intent:play.index('\n  }\n', intent) + 4])
+    media = playlist.index('    // first check if we were called from the PlayFile() function')
+    code = code.replace('@MEDIAPLAY@', playlist[media:playlist.index('      return;\n    }\n', media) + 20])
     with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:
         out = Path(tmp)
         (out / 'test.cpp').write_text(code)
+        if os.environ.get('DUMP'): Path(os.environ['DUMP']).write_text(code)
         subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                         str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)

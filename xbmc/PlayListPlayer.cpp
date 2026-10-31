@@ -101,14 +101,18 @@ bool CPlayListPlayer::OnMessage(CGUIMessage &message)
       }
     }
     break;
+  case GUI_MSG_PLAYBACK_ENDED:
   case GUI_MSG_PLAYBACK_STOPPED:
     {
-      // The stop of a playback that a newer open replaces does not stop the
-      // playlist: the playlist stop closes the player and drops the newer open.
-      // An explicit stop drops the newer open before this notification.
+      // An explicit stop ends the playlist, also when the playback reached the
+      // end first or the playlist item did not start yet. The stop of a
+      // playback that a newer open replaces does not stop the playlist: the
+      // playlist stop closes the player and drops the newer open.
       const auto& components = CServiceBroker::GetAppComponents();
       const auto appPlayer = components.GetComponent<CApplicationPlayer>();
-      if (m_iCurrentPlayList != TYPE_NONE && m_bPlaybackStarted && !appPlayer->HasPendingOpen())
+      const bool stopped{message.GetMessage() == GUI_MSG_PLAYBACK_STOPPED &&
+                         m_bPlaybackStarted && !appPlayer->HasPendingOpen()};
+      if (m_iCurrentPlayList != TYPE_NONE && (stopped || appPlayer->StopRequested()))
       {
         CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, m_iCurrentPlayList, m_iCurrentSong);
         CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);
@@ -365,7 +369,7 @@ bool CPlayListPlayer::Play(int iSong,
   m_bPlaybackStarted = false;
 
   const auto playAttempt = std::chrono::steady_clock::now();
-  bool ret = g_application.PlayFile(*item, player, bAutoPlay);
+  bool ret = g_application.PlayFile(*item, player, bAutoPlay, true);
   // OpenFile can release GUI ownership while Python changes the playlist.
   const auto selectionIsCurrent = [&]() {
     return m_iCurrentPlayList.load() == playlistId &&
@@ -1034,10 +1038,8 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     // first check if we were called from the PlayFile() function
     if (pMsg->lpVoid && pMsg->param2 == 0)
     {
-      // Discard the current playlist, if TMSG_MEDIA_PLAY gets posted with just a single item.
-      // Otherwise items may fail to play, when started while a playlist is playing.
-      Reset();
-
+      // PlayFile ends the playlist for a new single item. A restart, for example a
+      // seek to another stack part, keeps the playlist and its position.
       CFileItem *item = static_cast<CFileItem*>(pMsg->lpVoid);
       g_application.PlayFile(*item, "", pMsg->param1 != 0);
       delete item;

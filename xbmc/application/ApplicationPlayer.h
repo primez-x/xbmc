@@ -50,6 +50,9 @@ public:
   bool PreparePlaybackCleanup();
   bool PlaybackCleanupCompleted() const;
   bool PlaybackCleanupPending() const { return m_cleanupPending; }
+  // An explicit stop came before the end or stop notification of the player,
+  // and no open followed. The notification can still report the end.
+  bool StopRequested() const { return m_stopRequested; }
   std::string GetCurrentPlayer() const;
   float GetPlaySpeed() const;
   float GetPlayTempo() const;
@@ -227,6 +230,7 @@ private:
   bool m_closeAcknowledged{false};
   bool m_waitForPlaybackStop{false};
   bool m_shutdown{false};
+  bool m_stopRequested{false};
   uint64_t m_openGeneration{0};
   std::optional<uint64_t> m_cleanupGeneration;
   bool m_cleanupPending{false};

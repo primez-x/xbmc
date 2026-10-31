@@ -38,6 +38,8 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()
 bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> completion)
 {
   m_shutdown = m_shutdown || shutdown;
+  // Only a notification that has not arrived yet can be superseded.
+  m_stopRequested = m_stopRequested || m_waitForPlaybackStop;
   m_nextItem.pItem.reset();
   ResetPlayer(std::move(completion));
   return !GetInternal();
@@ -161,6 +163,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   // cleanup of the previous player. Main still owns its close continuation.
   ++m_openGeneration;
   m_cleanupPending = false;
+  m_stopRequested = false;
   const std::string newPlayer = playerName.empty() ? factory.GetDefaultPlayer(item) : playerName;
   auto player = GetInternal();
   const bool replace = player &&
