@@ -191,6 +191,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
   bool ret = player->OpenFile(item, options);
   m_waitForPlaybackStop = ret;
+  m_openedVideo = ret && item.IsVideo();
   // No intent supersedes the notification of the new playback yet.
   Supersede(Supersession::NONE);
 
@@ -206,19 +207,19 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
 uint64_t CApplicationPlayer::BeginOpen()
 {
-  m_openIntents.push_back({++m_intentSequence, m_openGeneration});
+  m_openIntents.push_back(++m_intentSequence);
   return m_intentSequence;
 }
 
-bool CApplicationPlayer::EndOpen(uint64_t intent)
+void CApplicationPlayer::EndOpen(uint64_t intent)
 {
-  const auto open = std::find_if(m_openIntents.begin(), m_openIntents.end(),
-                                 [intent](const auto& open) { return open.sequence == intent; });
-  if (open == m_openIntents.end())
-    return false;
-  const bool reached{open->openGeneration != m_openGeneration};
-  m_openIntents.erase(open);
-  return reached;
+  m_openIntents.erase(std::remove(m_openIntents.begin(), m_openIntents.end(), intent),
+                      m_openIntents.end());
+}
+
+bool CApplicationPlayer::IsPlayingOpenedVideo() const
+{
+  return m_openedVideo && !m_closingPlayer && IsPlaying();
 }
 
 void CApplicationPlayer::Supersede(Supersession supersession)
@@ -233,13 +234,13 @@ bool CApplicationPlayer::OpenRequested() const
 {
   // An open that has not reached the player supersedes older intents only.
   return m_supersededBy == Supersession::OPEN ||
-         (!m_openIntents.empty() && m_openIntents.back().sequence > m_supersededAt);
+         (!m_openIntents.empty() && m_openIntents.back() > m_supersededAt);
 }
 
 bool CApplicationPlayer::StopRequested() const
 {
   return m_supersededBy == Supersession::STOP &&
-         (m_openIntents.empty() || m_openIntents.back().sequence < m_supersededAt);
+         (m_openIntents.empty() || m_openIntents.back() < m_supersededAt);
 }
 
 bool CApplicationPlayer::HasPendingOpen() const

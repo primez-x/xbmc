@@ -14,7 +14,7 @@ retirement = runpy.run_path(str(ROOT / 'tools/test-player-retirement.py'))
 function = retirement['function']
 PRELUDE = retirement['PRELUDE'].replace(
     'bool IsDVDFile()const{return false;}',
-    'bool IsDVDFile()const{return false;} bool video=true;bool IsVideo()const{return video;} bool IsCDDA()const{return false;} bool IsOnDVD()const{return false;}')
+    'bool IsDVDFile()const{return false;} bool IsCDDA()const{return false;} bool IsOnDVD()const{return false;}')
 PRELUDE = PRELUDE.replace('struct CPlayerOptions {};', 'struct CPlayerOptions {bool fullscreen=false;};')
 PRELUDE = PRELUDE.replace('#include <cassert>', '#include <cassert>\n#include <functional>')
 PRELUDE = PRELUDE.replace('CCriticalSection* applicationLock=nullptr;', 'std::function<void()> onClose;CCriticalSection* applicationLock=nullptr;')
@@ -27,7 +27,7 @@ PRELUDE = PRELUDE.replace('int created=0;', """int created=0;bool failCreate=fal
   bool HasPendingOpen()const;bool HasPendingVideoOpen()const;
   bool HasPlayer()const{return bool(m_pPlayer);}
   bool PreparePlaybackCleanup();bool PlaybackCleanupCompleted()const;bool PlaybackCleanupPending()const{return m_cleanupPending;}
-  bool IsPlaying(){return m_pPlayer&&m_pPlayer->playing;}
+  bool IsPlaying()const{return m_pPlayer&&m_pPlayer->playing;}
   bool IsPlayingVideo(){return IsPlaying()&&m_pPlayer->hasVideo;}
   bool IsPlayingAudio(){return IsPlaying()&&m_pPlayer->hasAudio;}
   std::string GetName(){return "old";}""")
@@ -217,7 +217,8 @@ def main():
                 'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
                 'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(']
     signatures+=['bool CApplicationPlayer::HasPendingOpen() const', 'uint64_t CApplicationPlayer::BeginOpen()',
-                  'bool CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
+                  'void CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
+                  'bool CApplicationPlayer::IsPlayingOpenedVideo() const',
                   'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const',
                      'bool CApplicationPlayer::HasPendingVideoOpen() const',
                      'bool CApplicationPlayer::PreparePlaybackCleanup()',
@@ -282,9 +283,9 @@ def main():
             assert code.count(needle)==1
             run(code.replace(needle,'  if (!cleanup)'),
                 'CServiceBroker::gui.wm.active==HOME&&app.stack.clears==1')
-            needle='if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())'
+            needle='if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())'
             assert code.count(needle)==2
-            run(code.replace(needle,'if (appPlayer->HasPlayer())'),'!app.player.HasPendingOpen()')
+            run(code.replace(needle,'if (appPlayer->HasPlayer() || appPlayer->IsOpening())'),'!app.player.HasPendingOpen()')
 
 
 if __name__=='__main__':main()

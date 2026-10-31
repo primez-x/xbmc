@@ -256,7 +256,11 @@ protected:
   std::unique_ptr<MUSIC_INFO::CMusicInfoScanner> m_musicInfoScanner;
 
   bool PlayStack(CFileItem& item, bool bRestart);
-  bool StartPlayback(CFileItem item, const std::string& player, bool bRestart, bool playlistItem);
+  bool StartPlayback(CFileItem item,
+                     const std::string& player,
+                     bool bRestart,
+                     bool playlistItem,
+                     uint64_t intent);
 
   void HandlePortEvents();
 

@@ -266,7 +266,7 @@ def build(baseline=None):
              'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
              'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(',
              'bool CApplicationPlayer::HasPendingOpen() const', 'uint64_t CApplicationPlayer::BeginOpen()',
-                  'bool CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
+                  'void CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
                   'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const', 'bool CApplicationPlayer::HasPendingVideoOpen() const',
              'bool CApplicationPlayer::PreparePlaybackCleanup()', 'bool CApplicationPlayer::PlaybackCleanupCompleted() const']
     if baseline:

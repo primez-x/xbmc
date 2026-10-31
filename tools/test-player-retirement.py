@@ -28,7 +28,7 @@ struct CCriticalSection {
   void lock(){assert(!held);held=true;}
   void unlock(){assert(held);held=false;}
 };
-struct CFileItem {int id=0;bool disc=false;bool IsDiscImage()const{return disc;}bool IsDVDFile()const{return false;}};
+struct CFileItem {int id=0;bool disc=false,video=true;bool IsDiscImage()const{return disc;}bool IsDVDFile()const{return false;}bool IsVideo()const{return video;}};
 struct CPlayerOptions {};
 struct IPlayerCallback {};
 struct IPlayer {
@@ -50,8 +50,10 @@ struct CApplicationPlayer {
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
   bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
   enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
-  uint64_t m_supersededAt=0,m_intentSequence=0;struct SOpenIntent {uint64_t sequence,openGeneration;};std::vector<SOpenIntent> m_openIntents;
-  uint64_t BeginOpen();bool EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
+  uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
+  uint64_t BeginOpen();void EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
+  void CancelOpens(){m_opensCancelledAt=++m_intentSequence;}bool OpenCancelled(uint64_t intent)const{return intent<m_opensCancelledAt;}
+  bool IsPlayingOpenedVideo()const;
   bool OpenRequested()const;bool StopRequested()const;void Supersede(Supersession);
   uint64_t m_openGeneration=0;std::optional<uint64_t> m_cleanupGeneration;bool m_cleanupPending=false;
   struct {
@@ -150,10 +152,10 @@ def main():
     assert 'm_pendingStop = exitCode;' in stop and 'return false;' in stop
     assert 'm_pendingStop && !appPlayer->HasPlayer()' in frame
     assert 'Powerdown()' in frame and 'Reboot()' in frame
-    assert 'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())' in function(application, 'void CApplication::StopPlaying(')
+    assert 'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())' in function(application, 'void CApplication::StopPlaying(')
     playlist = (ROOT / 'xbmc/PlayListPlayer.cpp').read_text()
     media_stop = playlist[playlist.index('  case TMSG_MEDIA_STOP:'):playlist.index('  case TMSG_MEDIA_PAUSE:')]
-    assert 'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())' in media_stop
+    assert 'if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())' in media_stop
     assert 'if (!m_shutdownWatchdogStarted)' in stop
     gate_start = stop.index('  const auto appPlayer = GetComponent<CApplicationPlayer>();')
     gate_end = stop.index('  // Safety net', gate_start)

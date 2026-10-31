@@ -1149,14 +1149,16 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     wakeScreensaver();
 
     // A replacement can remain queued even after the original player retires.
-    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())
+    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
     {
       auto completion = pMsg->DeferCompletion();
       if (m_bIsDeferredPlayPending)
       {
         appPlayer->ClosePlayer(false, std::move(completion));
+        appPlayer->CancelOpens();
         // Without an end or stop notification to come, the stop ends the playlist.
-        if (!appPlayer->StopRequested())
+        // A playlist item that the stop cancels does not continue the playlist.
+        if (!appPlayer->StopRequested() || appPlayer->IsOpening())
           ResetCurrentPlaylist();
       }
       else

@@ -74,9 +74,10 @@ HARNESS = HARNESS.replace(
     ' void Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem);\n'
     ' std::function<void()> nested;void Accept(bool bRestart,bool playlistItem);\n'
     ' bool PlayFile(CFileItem item,const std::string& player,bool bRestart=false,bool playlistItem=false);bool abandon=false;\n'
-    ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem){\n'
+    ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem,uint64_t intent){\n'
     '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
     '  if(abandon)return false;\n'
+    '  const auto appPlayer=&player;@CANCELLED@\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);Accept(bRestart,playlistItem);return ret;}\n'
     ' bool Ended();\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
@@ -279,6 +280,62 @@ int main(){
   app.abandon=true;CFileItem next;next.id=60;assert(!app.PlayFile(next,"old",false,true));
   app.Frame();assert(!app.player.HasPlayer()&&!gfx.fullscreen&&gfx.restores==1);
  }
+ // The end of the previous playback during the resolution of an item that then
+ // fails to open, or opens audio: the waiting cleanup leaves fullscreen video.
+ for(int outcome:{0,1}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;
+  app.StopPlaying();
+  app.nested=[&]{app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+   app.Frame();assert(!app.player.HasPlayer()&&app.m_playbackCleanupDeferred);};
+  CFileItem next;next.id=80;app.player.failCreate=outcome==0;next.video=outcome==0;
+  app.PlayFile(next,"old",false,true);if(outcome==1)app.player.m_pPlayer->hasAudio=true;app.Frame();
+  assert(!gfx.fullscreen&&gfx.restores==1&&!app.m_playbackCleanupDeferred);
+ }
+ // A nested playback that starts and ends during the resolution of a cancelled
+ // open, also after a stop of the nested playback: the waiting cleanup runs.
+ for(bool stop:{false,true}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  app.nested=[&]{CFileItem nested;nested.id=30;assert(app.PlayFile(nested,"old",false,false));
+   if(stop)app.StopPlaying();
+   app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
+   old->canClose=true;app.Frame();
+   if(!stop){assert(app.player.IsPlaying());auto current=app.player.m_pPlayer;current->playing=false;
+    current->canClose=true;app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.Frame();}
+   assert(!app.player.HasPlayer()&&app.m_playbackCleanupDeferred);app.abandon=true;};
+  CFileItem outer;outer.id=60;assert(!app.PlayFile(outer,"old",false,false));app.Frame();
+  assert(!gfx.fullscreen&&gfx.restores==1&&!app.m_playbackCleanupDeferred);
+ }
+ // A nested video that still plays when the outer open is cancelled keeps the screen.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->canClose=true;app.StopPlaying();
+  app.nested=[&]{app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);app.Frame();
+   CFileItem nested;nested.id=30;assert(app.PlayFile(nested,"old",false,false));
+   assert(app.player.IsPlaying()&&app.m_playbackCleanupDeferred);app.abandon=true;};
+  CFileItem outer;outer.id=60;assert(!app.PlayFile(outer,"old",false,false));app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==30&&gfx.fullscreen&&gfx.restores==0);
+ }
+ // A stop during the resolution of an open cancels the open, with the end or
+ // stop notification of the stopped playback before or after the cancel. The
+ // stop ends the playlist, so the playlist does not skip to the next item.
+ for(bool lateNotification:{false,true}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{app.StopPlaying();assert(playlist.GetCurrentPlaylist()==TYPE_NONE);
+   if(!lateNotification){app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);old->canClose=true;app.Frame();}};
+  CFileItem next;next.id=60;assert(!app.PlayFile(next,"old",false,true));
+  assert(app.player.created==0&&!app.player.HasPendingOpen()&&!app.player.IsOpening());
+  if(lateNotification){app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);}
+  old->canClose=true;app.Frame();
+  assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen()&&app.player.created==0);
+  assert(playlist.selected==-1&&playlist.GetCurrentPlaylist()==TYPE_NONE&&CServiceBroker::pvr.ended==0);
+  assert(!gfx.fullscreen&&gfx.restores==1);
+ }
+ // A stop without playback during a resolution cancels the open too. A stop
+ // before an open does not cancel the open.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;app.StopPlaying();
+  app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);old->canClose=true;app.Frame();
+  assert(!app.player.HasPlayer());
+  app.nested=[&]{app.StopPlaying();};CFileItem next;next.id=60;assert(!app.PlayFile(next,"old",false,false));
+  assert(app.player.created==0&&!app.player.HasPlayer());
+  CFileItem later;later.id=61;assert(app.PlayFile(later,"old",false,false));
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==61);
+ }
  std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
 }
 """
@@ -291,7 +348,8 @@ def main():
                   'bool CApplicationPlayer::ClosePlayer(', 'void CApplicationPlayer::OnPlaybackStopped()',
                   'void CApplicationPlayer::OpenNext(', 'void CApplicationPlayer::ResetPlayer(',
                   'bool CApplicationPlayer::OpenFile(', 'bool CApplicationPlayer::HasPendingOpen() const', 'uint64_t CApplicationPlayer::BeginOpen()',
-                  'bool CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
+                  'void CApplicationPlayer::EndOpen(', 'void CApplicationPlayer::Supersede(',
+                  'bool CApplicationPlayer::IsPlayingOpenedVideo() const',
                   'bool CApplicationPlayer::OpenRequested() const', 'bool CApplicationPlayer::StopRequested() const',
                   'bool CApplicationPlayer::HasPendingVideoOpen() const',
                   'bool CApplicationPlayer::PreparePlaybackCleanup()',
@@ -328,6 +386,13 @@ def main():
     code = code.replace('@ENDPLAYLIST@', play[lambda_:play.index('  };\n', lambda_) + 5])
     # The accepted open and the accepted stack both repeat the reset.
     accept = play.index('  appPlayer->OpenFile(item, options,')
+    # A stop during a resolution or a dialog cancels the open: the check comes
+    # after the last dialog and before the accepted open and the accepted stack.
+    cancelled = '  if (appPlayer->OpenCancelled(intent))\n    return false;\n'
+    code = code.replace('@CANCELLED@', cancelled)
+    assert play.rindex(cancelled, 0, accept) > play.index('  // --- END ---'), 'open accepted after a stop'
+    stack_open = play.index('    if (!PlayStack(item, bRestart))')
+    assert play.rindex(cancelled, 0, stack_open) > play.index('if (dir && !dir->Resolve(item))'), 'stack accepted after a stop'
     assert '  endPlaylist();' in play[accept:], 'accepted open does not end the playlist'
     stack = play[play.index('  if (item.IsStack())'):]
     assert stack.index('  endPlaylist();') < stack.index('  return true;'), 'accepted stack does not end the playlist'

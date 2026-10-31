@@ -2641,11 +2641,13 @@ bool CApplication::PlayFile(CFileItem item,
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   // This open supersedes older intents for the end or stop notification of the
   // current playback, also during a resolution or a dialog that processes the
-  // notification. Terminal cleanup waits for the outcome of the open.
+  // notification. Terminal cleanup waits for the outcome of the open. An opened
+  // video keeps the screen; it can report the video stream later.
   const auto intent = appPlayer->BeginOpen();
-  const bool ret = StartPlayback(std::move(item), player, bRestart, playlistItem);
-  const bool reached = appPlayer->EndOpen(intent);
-  if (!appPlayer->IsOpening() && std::exchange(m_playbackCleanupDeferred, false) && !reached)
+  const bool ret = StartPlayback(std::move(item), player, bRestart, playlistItem, intent);
+  appPlayer->EndOpen(intent);
+  if (!appPlayer->IsOpening() && std::exchange(m_playbackCleanupDeferred, false) &&
+      !appPlayer->IsPlayingOpenedVideo())
     PlaybackCleanup();
   return ret;
 }
@@ -2653,7 +2655,8 @@ bool CApplication::PlayFile(CFileItem item,
 bool CApplication::StartPlayback(CFileItem item,
                                  const std::string& player,
                                  bool bRestart,
-                                 bool playlistItem)
+                                 bool playlistItem,
+                                 uint64_t intent)
 {
   // Ensure the MIME type has been retrieved for http:// and shout:// streams
   if (item.GetMimeType().empty())
@@ -2697,6 +2700,10 @@ bool CApplication::StartPlayback(CFileItem item,
   {
     return false;
   }
+
+  // A stop during the resolution cancels the open
+  if (appPlayer->OpenCancelled(intent))
+    return false;
 
   // if we have a stacked set of files, we need to setup our stack routines for
   // "seamless" seeking and total time of the movie etc.
@@ -2948,6 +2955,10 @@ bool CApplication::StartPlayback(CFileItem item,
   }
   // --- END ---
 
+  // A stop during a dialog cancels the open
+  if (appPlayer->OpenCancelled(intent))
+    return false;
+
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
   appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this);
@@ -3075,12 +3086,14 @@ void CApplication::StopPlaying(std::shared_ptr<CEvent> completion)
   {
     int iWin = gui->GetWindowManager().GetActiveWindow();
     const auto appPlayer = GetComponent<CApplicationPlayer>();
-    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen())
+    if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
     {
       appPlayer->ClosePlayer(false, std::move(completion));
+      appPlayer->CancelOpens();
       // Without an end or stop notification to come, for example after the stop
-      // of a queued playlist item, no notification ends the playlist.
-      if (!appPlayer->StopRequested())
+      // of a queued playlist item, no notification ends the playlist. A playlist
+      // item that the stop cancels does not continue the playlist.
+      if (!appPlayer->StopRequested() || appPlayer->IsOpening())
         CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
 
       // turn off visualisation window when stopping
