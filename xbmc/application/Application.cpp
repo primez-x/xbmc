@@ -2513,14 +2513,32 @@ private:
 
 bool CApplication::PlayMedia(CFileItem& item, const std::string& player, PLAYLIST::Id playlistId)
 {
+  // A stop during the resolution or the playlist load cancels the request
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
+  const auto intent = appPlayer->BeginOpen();
+  const bool ret = StartMedia(item, player, playlistId, intent);
+  EndOpen(intent);
+  return ret;
+}
+
+bool CApplication::StartMedia(CFileItem& item,
+                              const std::string& player,
+                              PLAYLIST::Id playlistId,
+                              uint64_t intent)
+{
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
   // if the item is a plugin we need to resolve the plugin paths
   if (URIUtils::HasPluginPath(item) && !XFILE::CPluginDirectory::GetResolvedPluginResult(item))
+    return false;
+  if (appPlayer->OpenCancelled(intent))
     return false;
 
   if (item.IsSmartPlayList())
   {
     CFileItemList items;
     CUtil::GetRecursiveListing(item.GetPath(), items, "", DIR_FLAG_NO_FILE_DIRS);
+    if (appPlayer->OpenCancelled(intent))
+      return false;
     if (items.Size())
     {
       CSmartPlaylist smartpl;
@@ -2557,6 +2575,8 @@ bool CApplication::PlayMedia(CFileItem& item, const std::string& player, PLAYLIS
 
     if (cancelled)
       return true;
+    if (appPlayer->OpenCancelled(intent))
+      return false;
 
     if (playlist)
     {
@@ -2641,15 +2661,21 @@ bool CApplication::PlayFile(CFileItem item,
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   // This open supersedes older intents for the end or stop notification of the
   // current playback, also during a resolution or a dialog that processes the
-  // notification. Terminal cleanup waits for the outcome of the open. An opened
-  // video keeps the screen; it can report the video stream later.
+  // notification. Terminal cleanup waits for the outcome of the open.
   const auto intent = appPlayer->BeginOpen();
   const bool ret = StartPlayback(std::move(item), player, bRestart, playlistItem, intent);
+  EndOpen(intent);
+  return ret;
+}
+
+void CApplication::EndOpen(uint64_t intent)
+{
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
   appPlayer->EndOpen(intent);
+  // An opened video keeps the screen; the video can report the video stream later
   if (!appPlayer->IsOpening() && std::exchange(m_playbackCleanupDeferred, false) &&
       !appPlayer->IsPlayingOpenedVideo())
     PlaybackCleanup();
-  return ret;
 }
 
 bool CApplication::StartPlayback(CFileItem item,

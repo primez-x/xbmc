@@ -369,7 +369,13 @@ bool CPlayListPlayer::Play(int iSong,
   m_bPlaybackStarted = false;
 
   const auto playAttempt = std::chrono::steady_clock::now();
+  // A stop cancels the attempt; a cancelled attempt is not a failed item
+  const auto appPlayer =
+      CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+  const auto intent = appPlayer->BeginOpen();
   bool ret = g_application.PlayFile(*item, player, bAutoPlay, true);
+  const bool cancelled = appPlayer->OpenCancelled(intent);
+  g_application.EndOpen(intent);
   // OpenFile can release GUI ownership while Python changes the playlist.
   const auto selectionIsCurrent = [&]() {
     return m_iCurrentPlayList.load() == playlistId &&
@@ -377,7 +383,7 @@ bool CPlayListPlayer::Play(int iSong,
   };
   if (!ret)
   {
-    if (!selectionIsCurrent())
+    if (cancelled || !selectionIsCurrent())
       return false;
 
     const int currentSong = m_iCurrentSong.load();
@@ -1077,16 +1083,19 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
         if (list->Size() == 1 && !(*list)[0]->IsPlayList())
         {
           CFileItemPtr item = (*list)[0];
+          // A stop during the resolution cancels the request
+          const auto intent = appPlayer->BeginOpen();
           // if the item is a plugin we need to resolve the URL to ensure the infotags are filled.
-          if (URIUtils::HasPluginPath(*item) &&
-              !XFILE::CPluginDirectory::GetResolvedPluginResult(*item))
+          if ((!URIUtils::HasPluginPath(*item) ||
+               XFILE::CPluginDirectory::GetResolvedPluginResult(*item)) &&
+              !appPlayer->OpenCancelled(intent))
           {
-            return;
+            if (item->IsAudio() || item->IsVideo())
+              Play(item, pMsg->strParam);
+            else
+              g_application.PlayMedia(*item, pMsg->strParam, playlistId);
           }
-          if (item->IsAudio() || item->IsVideo())
-            Play(item, pMsg->strParam);
-          else
-            g_application.PlayMedia(*item, pMsg->strParam, playlistId);
+          g_application.EndOpen(intent);
         }
         else
         {

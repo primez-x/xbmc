@@ -132,6 +132,9 @@ public:
   void OnApplicationMessage(KODI::MESSAGING::ThreadMessage* pMsg) override;
 
   bool PlayMedia(CFileItem& item, const std::string& player, PLAYLIST::Id playlistId);
+  // Ends an open that CApplicationPlayer::BeginOpen registered. Terminal cleanup
+  // that waited for the open runs after the last open.
+  void EndOpen(uint64_t intent);
   bool ProcessAndStartPlaylist(const std::string& strPlayList,
                                PLAYLIST::CPlayList& playlist,
                                PLAYLIST::Id playlistId,
@@ -255,6 +258,10 @@ protected:
 
   std::unique_ptr<MUSIC_INFO::CMusicInfoScanner> m_musicInfoScanner;
 
+  bool StartMedia(CFileItem& item,
+                  const std::string& player,
+                  PLAYLIST::Id playlistId,
+                  uint64_t intent);
   bool PlayStack(CFileItem& item, bool bRestart);
   bool StartPlayback(CFileItem item,
                      const std::string& player,

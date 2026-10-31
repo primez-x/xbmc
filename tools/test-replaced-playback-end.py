@@ -79,11 +79,12 @@ HARNESS = HARNESS.replace(
     '  if(abandon)return false;\n'
     '  const auto appPlayer=&player;@CANCELLED@\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);Accept(bRestart,playlistItem);return ret;}\n'
-    ' bool Ended();\n void Frame(){')
+    ' bool Ended();void EndOpen(uint64_t intent);\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
 bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bRestart,bool playlistItem){@PLAYFILE@}
+@ENDOPEN@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
 void CApplication::Intent(CFileItem item,bool bRestart,bool playlistItem){
@@ -341,6 +342,101 @@ int main(){
 """
 
 
+# The production playlist Play, with its failure handling, replaces the recording stand-in.
+PLAY_TESTS = r"""
+static void playlist(CApplication& app){
+ auto& playlist=CServiceBroker::playlist;playlist.list.items[0]->id=40;playlist.list.items[1]->id=41;(void)app;
+}
+int main(){
+ (void)&replace;(void)&opensLatest; // The cases of the first build use the helpers.
+ // A stop during the resolution of a playlist item cancels the item: the item
+ // is not unplayable, and the playlist does not continue.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{app.StopPlaying();app.player.OnPlaybackStopped();app.Frame();};
+  assert(!playlist.Play(0,"old"));
+  assert(playlist.list.unplayable==0&&playlist.GetCurrentPlaylist()==TYPE_NONE&&!app.player.HasPlayer());
+ }
+ // The same, but the user restarts the item from the playlist during the
+ // resolution: the restart plays, and the cancelled attempt changes nothing.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  app.nested=[&]{app.StopPlaying();app.player.OnPlaybackStopped();app.Frame();
+   playlist.SetCurrentPlaylist(TYPE_VIDEO);assert(playlist.Play(0,"old"));};
+  assert(!playlist.Play(0,"old"));
+  assert(playlist.list.unplayable==0&&playlist.m_iCurrentSong.load()==0);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40);
+ }
+ // A failed item without a stop is still unplayable, and the playlist continues.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;app.StopPlaying();app.player.OnPlaybackStopped();app.Frame();
+  playlist.SetCurrentPlaylist(TYPE_VIDEO);app.player.failCreate=true;
+  assert(!playlist.Play(0,"old"));assert(playlist.list.unplayable==2);
+ }
+ std::cout<<"PASS production playlist Play: a stop cancels an item without a failure\n";
+}
+"""
+
+
+def production_play(code, playlist, extract):
+    """Swap the recording Play for the production Play and its failure handling."""
+    code = code[:code.index('int main(){')]
+    code = code.replace('#include <cassert>', '#include <cassert>\n#include <chrono>')
+    code = code.replace('struct CFileItem {', """struct Tag {};
+struct CFileItem {
+ void SetProperty(const char*,bool){}void ClearProperty(const char*){}void SetDetectorBinding(std::shared_ptr<int>){}
+ bool IsVideoDb()const{return false;} bool HasVideoInfoTag()const{return false;}
+ Tag tag;Tag* GetVideoInfoTag(){return &tag;}std::string GetDynPath()const{return "probe";}
+ int GetStartOffset()const{return 0;}void SetStartOffset(int){}
+""", 1)
+    code = code.replace('struct SettingsComponent {', """struct CAdvancedSettings {int m_playlistRetries=100,m_playlistTimeout=0;};
+struct SettingsComponent {
+ std::shared_ptr<CAdvancedSettings> GetAdvancedSettings(){return std::make_shared<CAdvancedSettings>();}
+""", 1)
+    old = 'struct CPlayList {int size()const{return 2;}int GetPlayable()const{return 2;}};'
+    assert code.count(old) == 1
+    code = code.replace(old, """using CFileItemPtr=std::shared_ptr<CFileItem>;
+struct CPlayList {
+ std::vector<CFileItemPtr> items{std::make_shared<CFileItem>(),std::make_shared<CFileItem>()};int unplayable=0;
+ int size()const{return items.size();}int GetPlayable()const{return size()-unplayable;}
+ bool Expand(int){return false;}CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?items[n]:nullptr;}
+ void SetPlayed(bool){}void SetUnPlayable(int){++unplayable;}void Clear(){items.clear();}
+};""")
+    code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
+    code = code.replace('const CPlayList& GetPlaylist(int)const{return list;}',
+                        'const CPlayList& GetPlaylist(int)const{return list;} CPlayList& GetPlaylist(int){return list;}')
+    signature = 'bool CPlayListPlayer::Play(int iSong,'
+    production = extract(playlist, signature)
+    declaration = production[:production.index('{')]
+    optional = 'std::optional<bool>' in declaration
+    code = code.replace('bool Play(int,const std::string&,bool);',
+                        'bool Play(int,const std::string&,bool=false,bool=false' +
+                        (',std::optional<bool> = std::nullopt' if optional else '') +
+                        ');bool PlayPrevious(){return PlayNext(-1);}')
+    production = production.replace('  const Id playlistId', '  auto& g_application=*app;\n  const Id playlistId', 1)
+    stub = code[code.index('bool CPlayListPlayer::Play(int index,'):]
+    stub = stub[:stub.index('\n}\n') + 3]
+    return code.replace(stub, """constexpr int STARTOFFSET_RESUME=-1,LOGERROR=1,LOGDEBUG=2;
+struct CLog {template<class... A>static void Log(A&&...){}};
+struct CURL {CURL(const std::string&){} static std::string GetRedacted(const std::string& s){return s;}};
+namespace XFILE {struct CVideoDatabaseFile {static Tag GetVideoTag(const CURL&){return {};}};}
+namespace HELPERS {template<class... A>void ShowOKDialogText(A&&...){}}
+namespace DETECTOR_PLAYBACK {constexpr auto PROPERTY="playback";}
+namespace DETECTOR_ADMISSION {constexpr auto ITEM_SKIP="skip";void CaptureItem(CFileItem&) {}}
+""" + production) + PLAY_TESTS
+
+
+def compile_run(code, label):
+    with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:
+        out = Path(tmp)
+        (out / 'test.cpp').write_text(code)
+        if os.environ.get('DUMP'): Path(os.environ['DUMP'] + label).write_text(code)
+        subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                        str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
+        subprocess.run([str(out / 'test')], check=True, timeout=15)
+
+
 def main():
     source = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
     signatures = ['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
@@ -379,6 +475,7 @@ def main():
         'void CPlayListPlayer::SetCurrentPlaylist(')))
     wrapper = function(application, 'bool CApplication::PlayFile(')
     code = code.replace('@PLAYFILE@', wrapper[wrapper.index('{') + 1:wrapper.rindex('}')])
+    code = code.replace('@ENDOPEN@', function(application, 'void CApplication::EndOpen('))
     play = function(application, 'bool CApplication::StartPlayback(')
     intent = play.index('  if (!bRestart)\n  {')
     code = code.replace('@INTENT@', play[intent:play.index('\n  }\n', intent) + 4])
@@ -404,14 +501,23 @@ def main():
     assert 'PostMsg(TMSG_MEDIA_PLAY, 0, 0,' in trailer and 'PostMsg(TMSG_MEDIA_PLAY, 1,' not in trailer
     media = playlist.index('    // first check if we were called from the PlayFile() function')
     code = code.replace('@MEDIAPLAY@', playlist[media:playlist.index('      return;\n    }\n', media) + 20])
-    with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:
-        out = Path(tmp)
-        (out / 'test.cpp').write_text(code)
-        if os.environ.get('DUMP'): Path(os.environ['DUMP']).write_text(code)
-        subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                        str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
-        subprocess.run([str(out / 'test')], check=True, timeout=15)
+    # A request that resolves before PlayFile registers its open first, and a
+    # stop during the resolution cancels the request.
+    media = function(application, 'bool CApplication::PlayMedia(')
+    assert 'appPlayer->BeginOpen();' in media and 'EndOpen(intent);' in media, 'PlayMedia without an open'
+    start = function(application, 'bool CApplication::StartMedia(')
+    resolved = start.index('GetResolvedPluginResult(item)')
+    assert start.index('if (appPlayer->OpenCancelled(intent))', resolved) < start.index('if (item.IsSmartPlayList())')
+    for anchor, handoff in (('GetRecursiveListing(', 'ProcessAndStartPlaylist(smartpl'),
+                            ('CGUIDialogBusy::Wait(&getPlaylist', 'ProcessAndStartPlaylist(item.GetPath()')):
+        assert start.index('OpenCancelled(intent)', start.index(anchor)) < start.index(handoff), anchor
+    single = playlist[playlist.index('        if (list->Size() == 1 && !(*list)[0]->IsPlayList())'):]
+    single = single[:single.index('        }\n        else\n')]
+    assert single.index('appPlayer->BeginOpen();') < single.index('GetResolvedPluginResult(*item)')
+    assert single.index('!appPlayer->OpenCancelled(intent)') < single.index('Play(item, pMsg->strParam);')
+    assert single.rindex('g_application.EndOpen(intent);') > single.index('PlayMedia(*item')
+    compile_run(code, '')
+    compile_run(production_play(code, playlist, function), '-play')
 
 
 if __name__ == '__main__':
