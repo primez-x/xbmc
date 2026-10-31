@@ -371,7 +371,9 @@ bool CPlayListPlayer::Play(int iSong,
 
   const auto playAttempt = std::chrono::steady_clock::now();
   // A stop cancels the attempt; a cancelled attempt is not a failed item. The
-  // attempt lasts until the failure handling started the next item.
+  // attempt lasts until the failure handling started the next item. A newer
+  // attempt, also of the same item, supersedes the failure handling.
+  const unsigned int attemptNumber = ++m_playAttempts;
   const auto appPlayer =
       CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
   const KODI::UTILS::CScopeGuard<uint64_t, 0, void(uint64_t)> attempt(
@@ -379,13 +381,13 @@ bool CPlayListPlayer::Play(int iSong,
   bool ret = g_application.PlayFile(*item, player, bAutoPlay, true);
   const bool cancelled = appPlayer->OpenCancelled(attempt);
   // OpenFile can release GUI ownership while Python changes the playlist.
-  const auto selectionIsCurrent = [&]() {
-    return m_iCurrentPlayList.load() == playlistId &&
+  const auto attemptIsCurrent = [&]() {
+    return m_playAttempts == attemptNumber && m_iCurrentPlayList.load() == playlistId &&
            playlist.TryGet(m_iCurrentSong.load()) == item;
   };
   if (!ret)
   {
-    if (cancelled || !selectionIsCurrent())
+    if (cancelled || !attemptIsCurrent())
       return false;
 
     const int currentSong = m_iCurrentSong.load();
@@ -416,7 +418,7 @@ bool CPlayListPlayer::Play(int iSong,
       // open error dialog
       HELPERS::ShowOKDialogText(CVariant{16026}, CVariant{16027});
       // A stop during the dialog cancels this attempt, also when the same item restarted.
-      if (appPlayer->OpenCancelled(attempt) || !selectionIsCurrent())
+      if (appPlayer->OpenCancelled(attempt) || !attemptIsCurrent())
         return false;
 
       CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, playlistId, m_iCurrentSong.load());

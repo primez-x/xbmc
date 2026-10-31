@@ -425,6 +425,25 @@ int main(){
   assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40);
  }
+ // A newer playlist attempt of the same item supersedes the failure handling of
+ // the older attempt: a restart during the failure dialog, without a stop, and a
+ // restart during the resolution of an attempt that then fails.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlistRetries=1;playlist.SetCurrentPlaylist(TYPE_VIDEO);
+  app.nested=[&]{app.abandon=true;};
+  failureDialog=[&]{assert(playlist.Play(0,"old"));};
+  assert(!playlist.Play(0,"old"));playlistRetries=100;failureDialog={};
+  app.player.OnPlaybackStopped();app.Frame();
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&CServiceBroker::gui.wm.threadMessages==0);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40&&!app.player.m_closingPlayer);
+ }
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlist.SetCurrentPlaylist(TYPE_VIDEO);
+  app.nested=[&]{assert(playlist.Play(0,"old"));app.abandon=true;};
+  assert(!playlist.Play(0,"old"));app.player.OnPlaybackStopped();app.Frame();
+  assert(playlist.list.unplayable==0&&playlist.GetCurrentPlaylist()==TYPE_VIDEO);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40&&!app.player.m_closingPlayer);
+ }
  // The end of A during the resolution of item B; B fails, and the playlist
  // continues at C: the waiting cleanup does not leave fullscreen before C.
  {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
@@ -468,7 +487,7 @@ struct CPlayList {
     # An abandoned resolution fails one item only
     assert code.count('  if(abandon)return false;') == 1
     code = code.replace('  if(abandon)return false;', '  if(std::exchange(abandon,false))return false;')
-    code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
+    code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;unsigned int m_playAttempts=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
     code = code.replace('const CPlayList& GetPlaylist(int)const{return list;}',
                         'const CPlayList& GetPlaylist(int)const{return list;} CPlayList& GetPlaylist(int){return list;}')
     signature = 'bool CPlayListPlayer::Play(int iSong,'
