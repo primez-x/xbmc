@@ -189,7 +189,12 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
       return false;
   }
 
+  const auto generation = m_openGeneration;
   bool ret = player->OpenFile(item, options);
+  // A backend that processes messages during the open (UPnP) can run a newer
+  // open. That open retired or reused the player and owns the state.
+  if (generation != m_openGeneration)
+    return false;
   m_waitForPlaybackStop = ret;
   m_openedVideo = ret && item.IsVideo();
   // No intent supersedes the notification of the new playback yet.
@@ -207,8 +212,9 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
 
 uint64_t CApplicationPlayer::BeginOpen()
 {
-  m_openIntents.push_back(++m_intentSequence);
-  return m_intentSequence;
+  m_lastBegunIntent = ++m_intentSequence;
+  m_openIntents.push_back(m_lastBegunIntent);
+  return m_lastBegunIntent;
 }
 
 void CApplicationPlayer::EndOpen(uint64_t intent)

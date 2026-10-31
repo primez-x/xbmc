@@ -198,7 +198,6 @@ protected:
   bool m_bPlaybackStarted;
   std::atomic<bool> m_bIsDeferredPlayPending{false};
   int m_iFailedSongs;
-  unsigned int m_playAttempts{0};
   std::chrono::time_point<std::chrono::steady_clock> m_failedSongsStart;
   std::atomic<int> m_iCurrentSong;
   std::atomic<PLAYLIST::Id> m_iCurrentPlayList{PLAYLIST::TYPE_NONE};

@@ -50,9 +50,9 @@ struct CApplicationPlayer {
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
   bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
   enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
-  uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
+  uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0,m_lastBegunIntent=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
   uint64_t BeginOpen();void EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
-  void CancelOpens(){m_opensCancelledAt=++m_intentSequence;}bool OpenCancelled(uint64_t intent)const{return intent<m_opensCancelledAt;}
+@INLINE_INTENTS@
   bool IsPlayingOpenedVideo()const;uint64_t GetOpenGeneration()const{return m_openGeneration;}
   bool OpenRequested()const;bool StopRequested()const;void Supersede(Supersession);
   uint64_t m_openGeneration=0;std::optional<uint64_t> m_cleanupGeneration;bool m_cleanupPending=false;
@@ -74,6 +74,10 @@ struct CApplicationPlayer {
   }
 };
 '''
+# The inline intent predicates are the production ones.
+HEADER = (ROOT / 'xbmc/application/ApplicationPlayer.h').read_text()
+PRELUDE = PRELUDE.replace('@INLINE_INTENTS@', HEADER[HEADER.index('  void CancelOpens()'):
+                                                      HEADER.index('  // The player plays the video item')])
 TESTS = r'''
 int main(){
   shutdown_cases();

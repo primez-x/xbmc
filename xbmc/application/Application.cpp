@@ -2513,7 +2513,8 @@ private:
 
 bool CApplication::PlayMedia(CFileItem& item, const std::string& player, PLAYLIST::Id playlistId)
 {
-  // A stop during the resolution or the playlist load cancels the request
+  // A stop or a newer open during the resolution or the playlist load supersedes
+  // the request
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto intent = appPlayer->BeginOpen();
   const bool ret = StartMedia(item, player, playlistId, intent);
@@ -2530,14 +2531,14 @@ bool CApplication::StartMedia(CFileItem& item,
   // if the item is a plugin we need to resolve the plugin paths
   if (URIUtils::HasPluginPath(item) && !XFILE::CPluginDirectory::GetResolvedPluginResult(item))
     return false;
-  if (appPlayer->OpenCancelled(intent))
+  if (appPlayer->OpenSuperseded(intent))
     return false;
 
   if (item.IsSmartPlayList())
   {
     CFileItemList items;
     CUtil::GetRecursiveListing(item.GetPath(), items, "", DIR_FLAG_NO_FILE_DIRS);
-    if (appPlayer->OpenCancelled(intent))
+    if (appPlayer->OpenSuperseded(intent))
       return false;
     if (items.Size())
     {
@@ -2575,7 +2576,7 @@ bool CApplication::StartMedia(CFileItem& item,
 
     if (cancelled)
       return true;
-    if (appPlayer->OpenCancelled(intent))
+    if (appPlayer->OpenSuperseded(intent))
       return false;
 
     if (playlist)
@@ -2627,7 +2628,7 @@ bool CApplication::StartMedia(CFileItem& item,
 // A faster calculation of video time would improve this
 // substantially.
 // return value: same with PlayFile()
-bool CApplication::PlayStack(CFileItem& item, bool bRestart)
+bool CApplication::PlayStack(CFileItem& item, bool bRestart, uint64_t intent)
 {
   const auto stackHelper = GetComponent<CApplicationStackHelper>();
   if (!stackHelper->InitializeStack(item))
@@ -2650,14 +2651,18 @@ bool CApplication::PlayStack(CFileItem& item, bool bRestart)
     item.ClearProperty("savedplayerstate");
   }
 
-  return PlayFile(selectedStackPart, "", true);
+  // The part belongs to the request of the stack
+  return StartPlayback(std::move(selectedStackPart), "", true, false, intent);
 }
 
 bool CApplication::PlayFile(CFileItem item,
                             const std::string& player,
                             bool bRestart,
-                            bool playlistItem)
+                            bool playlistItem,
+                            uint64_t attempt)
 {
+  if (attempt)
+    return StartPlayback(std::move(item), player, bRestart, playlistItem, attempt);
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   // This open supersedes older intents for the end or stop notification of the
   // current playback, also during a resolution or a dialog that processes the
@@ -2727,8 +2732,8 @@ bool CApplication::StartPlayback(CFileItem item,
     return false;
   }
 
-  // A stop during the resolution cancels the open
-  if (appPlayer->OpenCancelled(intent))
+  // A stop or a newer open during the resolution supersedes the open
+  if (appPlayer->OpenSuperseded(intent))
     return false;
 
   // if we have a stacked set of files, we need to setup our stack routines for
@@ -2736,7 +2741,7 @@ bool CApplication::StartPlayback(CFileItem item,
   // will recall with restart set to true
   if (item.IsStack())
   {
-    if (!PlayStack(item, bRestart))
+    if (!PlayStack(item, bRestart, intent))
       return false;
     endPlaylist();
     return true;
@@ -2981,13 +2986,17 @@ bool CApplication::StartPlayback(CFileItem item,
   }
   // --- END ---
 
-  // A stop during a dialog cancels the open
-  if (appPlayer->OpenCancelled(intent))
+  // A stop or a newer open during a dialog supersedes the open
+  if (appPlayer->OpenSuperseded(intent))
     return false;
 
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
   appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this);
+  // A backend that processes messages during the open (UPnP) can run a stop or
+  // a newer open, which owns the playlist.
+  if (appPlayer->OpenSuperseded(intent))
+    return false;
   endPlaylist();
   appPlayer->SetVolume(appVolume->GetVolumeRatio());
   appPlayer->SetMute(appVolume->IsMuted());

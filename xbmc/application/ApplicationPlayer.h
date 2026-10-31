@@ -58,7 +58,12 @@ public:
   // A stop cancels the opens that began before the stop and did not reach the
   // player yet.
   void CancelOpens() { m_opensCancelledAt = ++m_intentSequence; }
-  bool OpenCancelled(uint64_t intent) const { return intent < m_opensCancelledAt; }
+  // A stop or a newer open supersedes every older open still in progress,
+  // whatever started the older open. One request owns one intent.
+  bool OpenSuperseded(uint64_t intent) const
+  {
+    return intent < m_opensCancelledAt || intent < m_lastBegunIntent;
+  }
   // The player plays the video item of the last open. The player can report the
   // video stream later.
   bool IsPlayingOpenedVideo() const;
@@ -258,6 +263,7 @@ private:
   uint64_t m_supersededAt{0};
   uint64_t m_intentSequence{0};
   uint64_t m_opensCancelledAt{0};
+  uint64_t m_lastBegunIntent{0};
   std::vector<uint64_t> m_openIntents;
   bool m_openedVideo{false};
   uint64_t m_openGeneration{0};

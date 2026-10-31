@@ -20,6 +20,11 @@ PRELUDE = autoplay['PRELUDE'].replace(
     'struct CFileItem {',
     'struct CFileItem {struct Prop{bool v=false;bool asBoolean(bool)const{return v;}};'
     'bool epg=false;Prop GetProperty(const char*)const{return {epg};}')
+# A backend open that processes messages (UPnP) runs the hook inside the open.
+PRELUDE = PRELUDE.replace('struct IPlayer {', 'static std::function<void()> backendWait;\nstruct IPlayer {', 1)
+PRELUDE = PRELUDE.replace('if(failOpen)return false;playing=true;return true;',
+                          'if(failOpen)return false;if(backendWait){auto wait=std::move(backendWait);wait();}'
+                          'playing=true;return true;', 1)
 HARNESS = autoplay['HARNESS']
 HARNESS = HARNESS[:HARNESS.index('static void ended(')]
 HARNESS = HARNESS.replace(
@@ -73,17 +78,17 @@ HARNESS = HARNESS.replace(
     ' struct {void Set(){}} m_playerEvent;int stackPlays=0,m_nextPlaylistItem=0;\n'
     ' void Intent(CFileItem item,bool bRestart,[[maybe_unused]] bool playlistItem);\n'
     ' std::function<void()> nested;void Accept(bool bRestart,bool playlistItem);\n'
-    ' bool PlayFile(CFileItem item,const std::string& player,bool bRestart=false,bool playlistItem=false);bool abandon=false;\n'
+    ' bool PlayFile(CFileItem item,const std::string& player,bool bRestart=false,bool playlistItem=false,uint64_t attempt=0);bool abandon=false;\n'
     ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem,uint64_t intent){\n'
     '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
     '  if(abandon)return false;\n'
     '  const auto appPlayer=&player;@CANCELLED@\n'
-    '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);Accept(bRestart,playlistItem);return ret;}\n'
+    '  const bool ret=player.OpenFile(item,{},services.factory,name,callback);@CANCELLED@Accept(bRestart,playlistItem);return ret;}\n'
     ' bool Ended();void EndOpen(uint64_t intent);\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
-bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bRestart,bool playlistItem){@PLAYFILE@}
+bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bRestart,bool playlistItem,uint64_t attempt){@PLAYFILE@}
 @ENDOPEN@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
@@ -204,16 +209,14 @@ int main(){
   assert(CServiceBroker::playlist.selected==1&&app.player.HasPendingOpen());
  }
  // A playlist open nested in the resolution or a dialog of a standalone open
- // does not survive the standalone open: the standalone EOF continues nothing.
- {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;auto& playlist=CServiceBroker::playlist;
+ // is newer and supersedes the standalone open: the playlist item and the
+ // playlist stay.
+ {CApplication app;begin(app);reset();auto& playlist=CServiceBroker::playlist;
   app.nested=[&]{playlist.SetCurrentPlaylist(TYPE_VIDEO);playlist.m_iCurrentSong=0;
    CFileItem nested;nested.id=30;assert(app.PlayFile(nested,"old",false,true));
    assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO);};
-  CFileItem standalone;standalone.id=42;assert(app.PlayFile(standalone,"old"));
-  assert(playlist.GetCurrentPlaylist()==TYPE_NONE&&app.player.m_nextItem.pItem->id==42);
-  app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);opensLatest(app,old);
-  app.player.m_pPlayer->playing=false;app.Ended();playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
-  assert(playlist.selected==-1&&!app.player.HasPendingOpen());
+  CFileItem standalone;standalone.id=42;assert(!app.PlayFile(standalone,"old"));
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&app.player.m_nextItem.pItem->id==30);
  }
  // A stop after the end queued the next playlist item: no notification
  // remains, so the stop ends the playlist and leaves the visualisation.
@@ -454,6 +457,43 @@ int main(){
   assert(playlist.list.unplayable==1&&app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);
   assert(gfx.fullscreen&&gfx.restores==0);
  }
+ // A newer open supersedes every older open still in progress, whatever
+ // started the older open: the next item that the end of A started,
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  app.nested=[&]{CFileItem y;y.id=50;assert(app.PlayFile(y,"old",false,false));app.Frame();};
+  app.Ended();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.m_closingPlayer);
+  assert(CServiceBroker::playlist.list.unplayable==0);
+ }
+ // a playlist item that the user started,
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlist.SetCurrentPlaylist(TYPE_VIDEO);
+  app.nested=[&]{CFileItem y;y.id=50;assert(app.PlayFile(y,"old",false,false));};
+  assert(!playlist.Play(0,"old"));app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.m_closingPlayer);
+  assert(playlist.list.unplayable==0&&CServiceBroker::gui.wm.threadMessages==0);
+ }
+ // and an open whose backend processes messages: a stop and a newer playlist
+ // during the backend open keep the newer playlist and the newer player state.
+ {CApplication app;begin(app);reset();playlist(app);
+  app.player.m_pPlayer.reset();app.player.m_waitForPlaybackStop=false;
+  auto& playlist=CServiceBroker::playlist;std::shared_ptr<IPlayer> newer;
+  backendWait=[&]{app.player.m_pPlayer->canClose=true;app.StopPlaying();assert(!app.player.HasPlayer());
+   playlist.SetCurrentPlaylist(TYPE_VIDEO);assert(playlist.Play(0,"new"));newer=app.player.m_pPlayer;
+   newer->hasVideo=true;app.player.OnPlaybackStopped();};
+  CFileItem x;x.id=99;assert(!app.PlayFile(x,"remote",false,false));
+  assert(playlist.GetCurrentPlaylist()==TYPE_VIDEO&&playlist.list.size()==2);
+  assert(app.player.m_pPlayer==newer&&newer->lastItem==40&&app.player.IsPlaying());
+ }
+ // Without a stop, the newer open replaces the backend player that still opens.
+ {CApplication app;begin(app);reset();
+  app.player.m_pPlayer.reset();app.player.m_waitForPlaybackStop=false;
+  backendWait=[&]{app.player.m_pPlayer->canClose=true;CFileItem y;y.id=50;
+   assert(app.PlayFile(y,"old",false,false)&&app.player.HasPendingOpen());};
+  CFileItem x;x.id=99;assert(!app.PlayFile(x,"remote",false,false));
+  assert(app.player.HasPendingOpen());app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50);
+ }
  std::cout<<"PASS production playlist Play: a stop cancels an item without a failure\n";
 }
 """
@@ -487,7 +527,7 @@ struct CPlayList {
     # An abandoned resolution fails one item only
     assert code.count('  if(abandon)return false;') == 1
     code = code.replace('  if(abandon)return false;', '  if(std::exchange(abandon,false))return false;')
-    code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;unsigned int m_playAttempts=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
+    code = code.replace('int selected=-1;', 'int m_iFailedSongs=0;std::chrono::steady_clock::time_point m_failedSongsStart;int selected=-1;')
     code = code.replace('const CPlayList& GetPlaylist(int)const{return list;}',
                         'const CPlayList& GetPlaylist(int)const{return list;} CPlayList& GetPlaylist(int){return list;}')
     signature = 'bool CPlayListPlayer::Play(int iSong,'
@@ -568,18 +608,27 @@ def main():
     code = code.replace('@ENDPLAYLIST@', play[lambda_:play.index('  };\n', lambda_) + 5])
     # The accepted open and the accepted stack both repeat the reset.
     accept = play.index('  appPlayer->OpenFile(item, options,')
-    # A stop during a resolution or a dialog cancels the open: the check comes
-    # after the last dialog and before the accepted open and the accepted stack.
-    cancelled = '  if (appPlayer->OpenCancelled(intent))\n    return false;\n'
+    # A stop or a newer open during a resolution, a dialog or a backend open
+    # supersedes the open: the check comes after the last dialog and before the
+    # accepted open and the accepted stack, and again after the open.
+    cancelled = '  if (appPlayer->OpenSuperseded(intent))\n    return false;\n'
     code = code.replace('@CANCELLED@', cancelled)
     assert play.rindex(cancelled, 0, accept) > play.index('  // --- END ---'), 'open accepted after a stop'
-    stack_open = play.index('    if (!PlayStack(item, bRestart))')
+    stack_open = play.index('    if (!PlayStack(item, bRestart, intent))')
     assert play.rindex(cancelled, 0, stack_open) > play.index('if (dir && !dir->Resolve(item))'), 'stack accepted after a stop'
     assert '  endPlaylist();' in play[accept:], 'accepted open does not end the playlist'
+    assert play.index(cancelled, accept) < play.index('  endPlaylist();', accept), 'backend open not superseded'
+    # One request owns one intent: the playlist attempt and the stack part.
+    assert 'if (attempt)\n    return StartPlayback(std::move(item), player, bRestart, playlistItem, attempt);' in wrapper
+    assert 'PlayStack(item, bRestart, intent)' in play
+    stack = function(application, 'bool CApplication::PlayStack(')
+    assert 'return StartPlayback(std::move(selectedStackPart), "", true, false, intent);' in stack
+    assert 'g_application.PlayFile(*item, player, bAutoPlay, true, attempt);' in playlist or \
+        'g_application.PlayFile(request, player, bAutoPlay, true, attempt);' in playlist
     stack = play[play.index('  if (item.IsStack())'):]
     assert stack.index('  endPlaylist();') < stack.index('  return true;'), 'accepted stack does not end the playlist'
     # The open registers before the resolution and the dialogs that process messages.
-    assert wrapper.index('appPlayer->BeginOpen();') < wrapper.index('StartPlayback('), 'open registers late'
+    assert wrapper.index('appPlayer->BeginOpen();') < wrapper.rindex('StartPlayback('), 'open registers late'
     # A trailer is a new open: the playlist and the stack of the movie end.
     trailer = application[application.index('  case GUI_MSG_PLAY_TRAILER:'):]
     trailer = trailer[:trailer.index('    break;')]
@@ -592,14 +641,14 @@ def main():
     assert 'appPlayer->BeginOpen();' in media and 'EndOpen(intent);' in media, 'PlayMedia without an open'
     start = function(application, 'bool CApplication::StartMedia(')
     resolved = start.index('GetResolvedPluginResult(item)')
-    assert start.index('if (appPlayer->OpenCancelled(intent))', resolved) < start.index('if (item.IsSmartPlayList())')
+    assert start.index('if (appPlayer->OpenSuperseded(intent))', resolved) < start.index('if (item.IsSmartPlayList())')
     for anchor, handoff in (('GetRecursiveListing(', 'ProcessAndStartPlaylist(smartpl'),
                             ('CGUIDialogBusy::Wait(&getPlaylist', 'ProcessAndStartPlaylist(item.GetPath()')):
-        assert start.index('OpenCancelled(intent)', start.index(anchor)) < start.index(handoff), anchor
+        assert start.index('OpenSuperseded(intent)', start.index(anchor)) < start.index(handoff), anchor
     single = playlist[playlist.index('        if (list->Size() == 1 && !(*list)[0]->IsPlayList())'):]
     single = single[:single.index('        }\n        else\n')]
     assert single.index('appPlayer->BeginOpen();') < single.index('GetResolvedPluginResult(*item)')
-    assert single.index('!appPlayer->OpenCancelled(intent)') < single.index('Play(item, pMsg->strParam);')
+    assert single.index('!appPlayer->OpenSuperseded(intent)') < single.index('Play(item, pMsg->strParam);')
     assert single.rindex('g_application.EndOpen(intent);') > single.index('PlayMedia(*item')
     compile_run(code, '')
     compile_run(production_play(code, playlist, function), '-play')

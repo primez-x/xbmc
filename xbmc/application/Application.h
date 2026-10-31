@@ -140,10 +140,12 @@ public:
                                PLAYLIST::Id playlistId,
                                int track = 0);
   // A new open (bRestart false) that is not a playlist item ends the playlist.
+  // A playlist attempt passes the intent of the attempt; other opens begin one.
   bool PlayFile(CFileItem item,
                 const std::string& player,
                 bool bRestart = false,
-                bool playlistItem = false);
+                bool playlistItem = false,
+                uint64_t attempt = 0);
   void StopPlaying(std::shared_ptr<CEvent> completion = {});
   void Restart(bool bSamePosition = true);
   void DelayedPlayerRestart();
@@ -262,7 +264,7 @@ protected:
                   const std::string& player,
                   PLAYLIST::Id playlistId,
                   uint64_t intent);
-  bool PlayStack(CFileItem& item, bool bRestart);
+  bool PlayStack(CFileItem& item, bool bRestart, uint64_t intent);
   bool StartPlayback(CFileItem item,
                      const std::string& player,
                      bool bRestart,
