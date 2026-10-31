@@ -527,6 +527,18 @@ int main(){
   app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==60&&app.player.m_waitForPlaybackStop);
  }
+ // A queued open X that opens and ends during the resolution of a newer item Y:
+ // Y supersedes the end of X, and Y plays.
+ {CApplication app;begin(app);reset();playlist(app);auto& playlist=CServiceBroker::playlist;
+  auto z=std::make_shared<CFileItem>();z->id=42;playlist.list.items.push_back(z);
+  auto old=app.player.m_pPlayer;old->playing=false;
+  assert(playlist.Play(0,"old")&&app.player.HasPendingOpen());app.player.OnPlaybackStopped();
+  app.nested=[&]{old->canClose=true;app.Frame();assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40);
+   app.player.m_pPlayer->playing=false;app.player.m_pPlayer->canClose=true;app.Ended();
+   assert(!app.player.HasPendingOpen());};
+  assert(playlist.Play(1,"old"));app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);
+ }
  // A stop alone during a backend open: the open writes no player state.
  {CApplication app;begin(app);reset();
   app.player.m_pPlayer.reset();app.player.m_waitForPlaybackStop=false;

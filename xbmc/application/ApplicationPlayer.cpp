@@ -200,8 +200,10 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
     return false;
   m_waitForPlaybackStop = ret;
   m_openedVideo = ret && item.IsVideo();
-  // No intent supersedes the notification of the new playback yet.
-  Supersede(Supersession::NONE);
+  // Only a request newer than the request of this playback supersedes the
+  // notification of the playback, also a request that is still in progress.
+  m_supersededBy = Supersession::NONE;
+  m_supersededAt = intent;
 
   m_nextItem.pItem.reset();
 
