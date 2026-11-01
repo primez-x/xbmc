@@ -178,6 +178,8 @@ public:
 
   void SeekPercentage(float percent);
   void SeekTime( double dTime = 0.0 );
+  // Main thread: seeks the playing regular stack to the time, also into another part
+  void SeekStackTime(int64_t timeMs);
 
   void UpdateLibraries();
 

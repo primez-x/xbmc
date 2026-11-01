@@ -1061,8 +1061,8 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     // first check if we were called from the PlayFile() function
     if (pMsg->lpVoid && pMsg->param2 == 0)
     {
-      // PlayFile ends the playlist for a new single item. A restart, for example a
-      // seek to another stack part, keeps the playlist and its position.
+      // PlayFile ends the playlist for a new single item. A restart keeps the
+      // playlist and its position.
       CFileItem *item = static_cast<CFileItem*>(pMsg->lpVoid);
       g_application.PlayFile(*item, "", pMsg->param1 != 0);
       delete item;
@@ -1217,6 +1217,9 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
 
     break;
   }
+  case TMSG_MEDIA_SEEK_STACK_TIME:
+    g_application.SeekStackTime(pMsg->param3);
+    break;
   default:
     break;
   }

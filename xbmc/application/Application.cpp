@@ -3975,6 +3975,28 @@ double CApplication::GetTime() const
 // time is the time offset from the beginning of the file as opposed to a
 // delta from the current position.  This method accepts a double to be
 // consistent with GetTime() and GetTotalTime().
+void CApplication::SeekStackTime(int64_t timeMs)
+{
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
+  const auto stackHelper = GetComponent<CApplicationStackHelper>();
+
+  // a stop or a newer item before the seek ends the stack
+  if (!appPlayer->IsPlaying() || !stackHelper->IsPlayingRegularStack())
+    return;
+
+  const int part = stackHelper->GetStackPartNumberAtTimeMs(static_cast<uint64_t>(timeMs));
+  const uint64_t startOfPart = stackHelper->GetStackPartStartTimeMs(part);
+  if (part == stackHelper->GetCurrentPartNumber())
+  {
+    appPlayer->SeekTime(timeMs - startOfPart);
+    return;
+  }
+  stackHelper->SetStackPartCurrentFileItem(part);
+  CFileItem item(stackHelper->GetCurrentStackPartFileItem());
+  item.SetStartOffset(timeMs - startOfPart);
+  PlayFile(std::move(item), "", true);
+}
+
 void CApplication::SeekTime( double dTime )
 {
   const auto appPlayer = GetComponent<CApplicationPlayer>();
@@ -3998,12 +4020,12 @@ void CApplication::SeekTime( double dTime )
         appPlayer->SeekTime(static_cast<uint64_t>(dTime * 1000.0) - startOfNewFile);
       else
       { // seeking to a new file
-        stackHelper->SetStackPartCurrentFileItem(partNumberToPlay);
-        CFileItem* item = new CFileItem(stackHelper->GetCurrentStackPartFileItem());
-        item->SetStartOffset(static_cast<uint64_t>(dTime * 1000.0) - startOfNewFile);
         // don't just call "PlayFile" here, as we are quite likely called from the
-        // player thread, so we won't be able to delete ourselves.
-        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 1, 0, static_cast<void*>(item));
+        // player thread, so we won't be able to delete ourselves. The main thread
+        // opens the part in order with a stop: a seek that a stop overtakes
+        // changes no stack and plays nothing.
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_SEEK_STACK_TIME,
+                                                   static_cast<int64_t>(dTime * 1000.0));
       }
       return;
     }
