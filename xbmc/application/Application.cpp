@@ -3984,9 +3984,13 @@ void CApplication::SeekStackTime(int64_t timeMs)
   if (!appPlayer->IsPlaying() || !stackHelper->IsPlayingRegularStack())
     return;
 
+  // find the item in the stack we are seeking to, and load the new file if
+  // necessary, and calculate the correct seek within the new file. The open of
+  // the current part can still wait for the close of the previous part: then the
+  // open of the part again takes the new time.
   const int part = stackHelper->GetStackPartNumberAtTimeMs(static_cast<uint64_t>(timeMs));
   const uint64_t startOfPart = stackHelper->GetStackPartStartTimeMs(part);
-  if (part == stackHelper->GetCurrentPartNumber())
+  if (part == stackHelper->GetCurrentPartNumber() && !appPlayer->HasPendingOpen())
   {
     appPlayer->SeekTime(timeMs - startOfPart);
     return;
@@ -4009,24 +4013,13 @@ void CApplication::SeekTime( double dTime )
 
     if (stackHelper->IsPlayingRegularStack())
     {
-      // find the item in the stack we are seeking to, and load the new
-      // file if necessary, and calculate the correct seek within the new
-      // file.  Otherwise, just fall through to the usual routine if the
-      // time is higher than our total time.
-      int partNumberToPlay =
-          stackHelper->GetStackPartNumberAtTimeMs(static_cast<uint64_t>(dTime * 1000.0));
-      uint64_t startOfNewFile = stackHelper->GetStackPartStartTimeMs(partNumberToPlay);
-      if (partNumberToPlay == stackHelper->GetCurrentPartNumber())
-        appPlayer->SeekTime(static_cast<uint64_t>(dTime * 1000.0) - startOfNewFile);
-      else
-      { // seeking to a new file
-        // don't just call "PlayFile" here, as we are quite likely called from the
-        // player thread, so we won't be able to delete ourselves. The main thread
-        // opens the part in order with a stop: a seek that a stop overtakes
-        // changes no stack and plays nothing.
-        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_SEEK_STACK_TIME,
-                                                   static_cast<int64_t>(dTime * 1000.0));
-      }
+      // A seek in a stack can open another part. Don't just call "PlayFile" here,
+      // as we are quite likely called from the player thread, so we won't be able
+      // to delete ourselves. The main thread runs the seeks of a stack in the
+      // order of the requests and in order with a stop: a seek that a stop
+      // overtakes changes no stack and plays nothing.
+      CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_SEEK_STACK_TIME,
+                                                 static_cast<int64_t>(dTime * 1000.0));
       return;
     }
     // convert to milliseconds and perform seek
