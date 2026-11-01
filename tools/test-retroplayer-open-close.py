@@ -5,9 +5,12 @@ A newer item can retire the game player while the open of the game waits in a
 dialog: the game client selection with the emulator install, the savestate
 question, or a wake dialog of a network share during the initialization of the
 game client, the open of the game, the load of the savestate or the request of
-the achievements. The router closes the player, and the open of the newer item
-can complete before the dialog returns. The close leaves the item to the open,
-and the open of the game then releases the item and starts nothing. The close of a player
+the achievements. The router closes the player each frame until the close
+completes, and opens the newer item after the close completes. The open owns
+the item until the open returns: a close during the open (also from another
+thread) cancels the open and completes only after the open released the item.
+The game clients are shared (the add-on cache), so the newer game uses the game
+client after the retired open released the game client. The close of a player
 reports the end only of a started game, and a close without an open item
 changes nothing: the retired player reports no end that stops the newer item,
 and the close in the destructor of the retired player keeps the render
@@ -30,6 +33,7 @@ PRELUDE = r'''
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 using CCriticalSection = std::recursive_mutex;
 constexpr int LOGINFO=0, LOGERROR=1, LOGDEBUG=2, TMSG_SWITCHTOFULLSCREEN=3;
@@ -42,13 +46,14 @@ static std::function<bool()> savestateDialog;
 enum {SELECTION,INITIALIZE,GAME_OPEN,SAVESTATE_QUESTION,ACHIEVEMENTS,PLAYBACK,STEPS};
 static int waitStep=-1;static std::function<void()> waitHook;
 static void Wait(int step){if(step==waitStep&&waitHook)std::exchange(waitHook,nullptr)();}
-static int savestates=0;
+static int savestates=0,questions=0;
 struct CGUIDialogYesNo {template<class... A> static bool ShowAndGetInput(A&&...){
- Wait(SAVESTATE_QUESTION);return savestateDialog?std::exchange(savestateDialog,nullptr)():true;}};
+ ++questions;Wait(SAVESTATE_QUESTION);return savestateDialog?std::exchange(savestateDialog,nullptr)():true;}};
 struct GameTag {std::string GetGameClient()const{return "game.test";}};
 struct CFileItem {std::string GetPath()const{return "game.rom";} GameTag* GetGameInfoTag(){static GameTag g;return &g;}};
 struct CPlayerOptions {};
-struct Callback {int started=0,ended=0;void OnPlayBackStarted(const CFileItem&){++started;}
+static std::function<void()> startedHook;
+struct Callback {int started=0,ended=0;void OnPlayBackStarted(const CFileItem&){++started;if(startedHook)std::exchange(startedHook,nullptr)();}
  void OnAVStarted(const CFileItem&){} void OnPlayBackEnded(){++ended;}};
 struct GameSettings {bool AutosaveEnabled(){return false;} std::string GetRAUsername(){return {};}
  std::string GetRAToken(){return {};}};
@@ -60,15 +65,17 @@ struct CRPProcessInfo: Dummy {static std::unique_ptr<CRPProcessInfo> CreateInsta
 using CGUIGameMessenger=Dummy;using CRPRenderManager=Dummy;using CRPStreamManager=Dummy;
 using CRetroPlayerInput=Dummy;using CCheevos=Dummy;using CGUIPlaybackControl=Dummy;using CRetroPlayerAutoSave=Dummy;
 static int gameOpens=0,gameCloses=0;
-struct CGameClient {bool playing=false;bool Initialize(){Wait(INITIALIZE);return true;}
+struct CGameClient {bool playing=false,loaded=false;bool Initialize(){Wait(INITIALIZE);loaded=true;return true;}
  template<class... A> bool OpenFile(A&&...){Wait(GAME_OPEN);++gameOpens;playing=true;return true;}
  template<class... A> bool OpenStandalone(A&&...){++gameOpens;playing=true;return true;}
  std::string ID(){return "game.test";}std::string Name(){return "test";}float GetFrameRate(){return 60;}
- void CloseFile(){++gameCloses;playing=false;}void Unload(){}
+ void CloseFile(){++gameCloses;playing=false;}void Unload(){loaded=false;playing=false;}
 };
+// The add-on manager returns the one cached game client of an add-on to every player.
+static std::shared_ptr<CGameClient>& CachedClient(){static auto client=std::make_shared<CGameClient>();return client;}
 namespace ADDON {using AddonPtr=std::shared_ptr<CGameClient>;enum class AddonType{GAMEDLL};enum class OnlyEnabled{CHOICE_YES};}
 using ADDON::OnlyEnabled;
-struct AddonMgr {bool GetAddon(const std::string&, ADDON::AddonPtr& p, ADDON::AddonType, OnlyEnabled){p=std::make_shared<CGameClient>();return true;}
+struct AddonMgr {bool GetAddon(const std::string&, ADDON::AddonPtr& p, ADDON::AddonType, OnlyEnabled){p=CachedClient();return true;}
  bool GetAddon(const std::string&, ADDON::AddonPtr& p, OnlyEnabled){p=std::make_shared<CGameClient>();return true;}};
 struct Messenger {int fullscreen=0;void PostMsg(int){++fullscreen;}};
 struct CServiceBroker {static AddonMgr& GetAddonMgr(){static AddonMgr a;return a;}
@@ -91,7 +98,8 @@ struct CRetroPlayer {
  std::unique_ptr<CGUIPlaybackControl> m_playbackControl;std::unique_ptr<CRetroPlayerAutoSave> m_autoSave;
  explicit CRetroPlayer(Callback& c):m_callback(c){}
  ~CRetroPlayer(){CloseFile();}
- bool OpenFile(const CFileItem&,const CPlayerOptions&);bool CloseFile(bool=false);void CloseItem();
+ bool OpenFile(const CFileItem&,const CPlayerOptions&);bool OpenItem(const CFileItem&,const CPlayerOptions&);
+ bool OpenCancelled();bool CloseFile(bool=false);void CloseItem();
  bool IsPlaying()const{return m_gameClient&&m_gameClient->playing;}
  void PrintGameInfo(const CFileItem&){} void RegisterWindowCallbacks(){}void UnregisterWindowCallbacks(){}
  void CreatePlayback(const std::string&){Wait(PLAYBACK);assert(m_gameClient);m_playback=std::make_unique<Dummy>();}
@@ -99,23 +107,33 @@ struct CRetroPlayer {
 '''
 
 MAIN = r'''
-static void reset(){gameOpens=gameCloses=savestates=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
- CServiceBroker::GetAppMessenger()->fullscreen=0;}
+static void reset(){gameOpens=gameCloses=savestates=questions=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
+ startedHook=nullptr;CachedClient()=std::make_shared<CGameClient>();CServiceBroker::GetAppMessenger()->fullscreen=0;}
 int main(){
  // A newer item retires the player during each step of the open that can wait
- // in a dialog. The close leaves the item to the open, and the open releases the
- // item: the game client closes, and the open saves no game.
- for(int step=0;step<STEPS;++step){reset();Callback cb;
-  {CRetroPlayer player(cb);bool closed=false;
-   otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;
-   waitHook=[&]{assert(player.CloseFile()&&(player.m_processInfo==nullptr)==(step==SELECTION));closed=true;};
+ // in a dialog, and during the start of the game (STEPS). The close comes from
+ // the dialog on the thread of the open, or from another thread. The close is
+ // incomplete until the open returns; the open then releases the item: the
+ // game client closes, and a game that never started reports no end.
+ for(int thread=0;thread<2;++thread)
+ for(int step=0;step<=STEPS;++step){reset();Callback cb;const bool started=step==STEPS;
+  {CRetroPlayer player(cb);int closes=0;
+   const auto close=[&]{bool done=true;
+    if(thread){std::thread other([&]{done=player.CloseFile();});other.join();}else done=player.CloseFile();
+    assert(!done);++closes;};
+   // A savestate of another game client asks the question before the open continues.
+   otherClientSave=true;
+   if(started)startedHook=[&]{close();};else{waitStep=step;waitHook=[&]{close();close();};}
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{}));
-   assert(closed&&cb.started==0&&cb.ended==0&&!player.IsPlaying()&&savestates==0);
+   assert(closes==(started?1:2)&&player.CloseFile());
+   assert(cb.started==started&&cb.ended==started&&!player.IsPlaying()&&savestates==0);
    assert(!player.m_gameClient&&!player.m_processInfo&&!player.m_playback&&!player.m_input);
-   assert(gameCloses==(step==SELECTION?0:1)&&CServiceBroker::GetAppMessenger()->fullscreen==0);
+   assert(gameCloses==(step==SELECTION?0:1)&&CServiceBroker::GetAppMessenger()->fullscreen==started);
+   // A cancelled open asks no question
+   assert(questions==(step>=SAVESTATE_QUESTION));
   }
-  // the game never started: the destructor reports no end
-  assert(cb.ended==0);
+  // the destructor reports no second end
+  assert(cb.ended==started);
  }
  // An open without a close plays; the close reports the end once.
  {reset();Callback cb;
@@ -141,8 +159,9 @@ int main(){
 '''
 
 # The render manager of the games is shared, and the unregistration has no
-# owner: a newer game that starts during the dialog of the retired game keeps
-# the render callbacks and the render targets after the retired player ends.
+# owner. The router opens the newer game after the close of the retired player
+# completed: the newer game keeps the game client, the render callbacks and the
+# render targets after the retired player ends.
 RENDER_MANAGER = r'''
 struct Dummy; struct CRetroPlayer;
 using CGUIRenderTargetFactory=Dummy; using IRenderCallback=Dummy; using IGameCallback=CRetroPlayer;
@@ -162,23 +181,20 @@ static CGUIGameRenderManager sharedRenderer;
 RENDER_MAIN = r'''
 int main(){
  for(int step=0;step<STEPS;++step){
-  Callback oldCb,newCb;savestates=0;
+  Callback oldCb,newCb;savestates=0;CachedClient()=std::make_shared<CGameClient>();
   auto old=std::make_unique<CRetroPlayer>(oldCb);
   auto newer=std::make_unique<CRetroPlayer>(newCb);
   CGUIRenderHandle handle;
   sharedRenderer.m_renderTargets.emplace(&handle,nullptr);
-  const auto replace=[&]{
-   assert(old->CloseFile());
-   otherClientSave=false;
-   assert(newer->OpenFile(CFileItem{},CPlayerOptions{}));
-   assert(sharedRenderer.m_gameCallback==newer.get()&&sharedRenderer.m_renderTargets.at(&handle));
-   return true;
-  };
-  otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;waitHook=[&]{replace();};
+  otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;waitHook=[&]{assert(!old->CloseFile());};
   assert(!old->OpenFile(CFileItem{},CPlayerOptions{}));
+  assert(old->CloseFile());
+  otherClientSave=false;
+  assert(newer->OpenFile(CFileItem{},CPlayerOptions{}));
+  assert(sharedRenderer.m_gameCallback==newer.get()&&sharedRenderer.m_renderTargets.at(&handle));
   old.reset();
   assert(oldCb.started==0&&oldCb.ended==0&&savestates==0);
-  assert(newer->IsPlaying()&&newCb.started==1&&newCb.ended==0);
+  assert(newer->IsPlaying()&&CachedClient()->loaded&&newCb.started==1&&newCb.ended==0);
   assert(sharedRenderer.IsPlayingGame()&&sharedRenderer.m_gameCallback==newer.get());
   assert(sharedRenderer.m_renderTargets.at(&handle));
   newer.reset();
@@ -196,7 +212,7 @@ def compile_run(code):
         (out / 'test.cpp').write_text(code)
         subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
                         '-Wno-misleading-indentation', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                        '-fno-omit-frame-pointer', str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
+                        '-fno-omit-frame-pointer', '-pthread', str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         subprocess.run([str(out / 'test')], check=True, timeout=15)
 
 
@@ -207,8 +223,9 @@ def main():
     members = header[header.index('  // Synchronization parameters'):header.index('};\n} // namespace RETRO')]
     members = members.replace('  CCriticalSection m_mutex;\n', '')
     prelude = PRELUDE.replace('@MEMBERS@', members)
-    player = function(source, 'bool CRetroPlayer::OpenFile(') + function(source, 'bool CRetroPlayer::CloseFile(') + \
-        function(source, 'void CRetroPlayer::CloseItem()')
+    player = ''.join(function(source, signature) for signature in (
+        'bool CRetroPlayer::OpenFile(', 'bool CRetroPlayer::OpenItem(', 'bool CRetroPlayer::OpenCancelled()',
+        'bool CRetroPlayer::CloseFile(', 'void CRetroPlayer::CloseItem()'))
     compile_run(prelude + player + MAIN)
     # The production registration of the window callbacks and the render manager.
     manager = (ROOT / 'xbmc/cores/RetroPlayer/guibridge/GUIGameRenderManager.cpp').read_text()

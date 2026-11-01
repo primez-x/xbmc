@@ -52,6 +52,7 @@
 
 #include <memory>
 #include <mutex>
+#include <utility>
 
 using namespace KODI;
 using namespace GAME;
@@ -72,11 +73,35 @@ CRetroPlayer::~CRetroPlayer()
 
 bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
 {
+  {
+    std::unique_lock<CCriticalSection> lock(m_itemMutex);
+    m_itemState = ItemState::OPENING;
+  }
+
+  const bool opened = OpenItem(file, options);
+
+  {
+    std::unique_lock<CCriticalSection> lock(m_itemMutex);
+    if (m_itemState == ItemState::OPENING)
+    {
+      m_itemState = ItemState::OPEN;
+      return opened;
+    }
+  }
+
+  CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the open");
+  CloseItem();
+
+  std::unique_lock<CCriticalSection> lock(m_itemMutex);
+  m_itemState = ItemState::NONE;
+  return false;
+}
+
+bool CRetroPlayer::OpenItem(const CFileItem& file, const CPlayerOptions& options)
+{
   CFileItem fileCopy(file);
 
   std::string savestatePath;
-
-  m_itemOpen = true;
 
   // When playing a game, set the game client that we'll use to open the game.
   // This will prompt the user to select a savestate if there are any.
@@ -88,11 +113,8 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
               "RetroPlayer[PLAYER]: No compatible game client selected, aborting playback");
     return false;
   }
-  if (!m_itemOpen)
-  {
-    CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the game client selection");
+  if (OpenCancelled())
     return false;
-  }
 
   // Check if we should open in standalone mode
   const bool bStandalone = fileCopy.GetPath().empty();
@@ -103,7 +125,6 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
     CLog::Log(LOGERROR, "RetroPlayer[PLAYER]: Failed to create - no process info registered");
     return false;
   }
-  m_opening = true;
 
   m_processInfo->SetDataCache(&CServiceBroker::GetDataCacheCore());
   m_processInfo->ResetInfo();
@@ -165,6 +186,9 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
       CLog::Log(LOGERROR, "RetroPlayer[PLAYER]: Failed to initialize {}", gameClientId);
   }
 
+  if (OpenCancelled())
+    return false;
+
   if (bSuccess && !bStandalone)
   {
     CSavestateDatabase savestateDb;
@@ -203,16 +227,8 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
     CreatePlayback(savestatePath);
   }
 
-  // Every step above can wait in a dialog (also a wake dialog of a network
-  // share), and a newer item can retire the player in the dialog. The open
-  // then releases the item and starts nothing.
-  m_opening = false;
-  if (!m_itemOpen)
-  {
-    CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the open");
-    CloseItem();
+  if (OpenCancelled())
     return false;
-  }
 
   if (bSuccess)
   {
@@ -242,13 +258,35 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
   return bSuccess;
 }
 
+bool CRetroPlayer::OpenCancelled()
+{
+  // Every step of the open can wait in a dialog (also a wake dialog of a network
+  // share), and a newer item can retire the player in the dialog. The open then
+  // asks nothing more and starts nothing.
+  std::unique_lock<CCriticalSection> lock(m_itemMutex);
+  return m_itemState == ItemState::CLOSING;
+}
+
 bool CRetroPlayer::CloseFile(bool reopen /* = false */)
 {
-  if (!m_itemOpen.exchange(false) || m_opening)
-    return true;
+  {
+    std::unique_lock<CCriticalSection> lock(m_itemMutex);
+    if (m_itemState == ItemState::NONE)
+      return true;
+    // A close during the open leaves the release of the item to the open. The
+    // application calls CloseFile each frame until the close completes, and
+    // opens a newer item (also with the same shared game client) after the
+    // close completes.
+    const bool open = m_itemState == ItemState::OPEN;
+    m_itemState = ItemState::CLOSING;
+    if (!open)
+      return false;
+  }
 
   CloseItem();
 
+  std::unique_lock<CCriticalSection> lock(m_itemMutex);
+  m_itemState = ItemState::NONE;
   return true;
 }
 
@@ -256,14 +294,12 @@ void CRetroPlayer::CloseItem()
 {
   CLog::Log(LOGDEBUG, "RetroPlayer[PLAYER]: Closing file");
 
-  // Only a started game registered the window callbacks, has a game to save,
-  // and has an end to report
-  const bool started = m_started.exchange(false);
+  // Only a started game has a game to save and an end to report
+  const bool started = std::exchange(m_started, false);
 
   m_autoSave.reset();
 
-  if (started)
-    UnregisterWindowCallbacks();
+  UnregisterWindowCallbacks();
 
   m_playbackControl.reset();
 
