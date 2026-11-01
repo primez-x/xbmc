@@ -14,7 +14,9 @@ newer game uses them after the retired open released them. The close of a player
 reports the end only of a started game, and a close without an open item
 changes nothing: the retired player reports no end that stops the newer item,
 and the close in the destructor of the retired player keeps the render
-callbacks of a newer game.
+callbacks of a newer game. A shutdown waits for the close of the player, so a
+stop that waits ends the modal loops of the main thread: the open returns, the
+close completes, and the shutdown continues.
 """
 import runpy
 import subprocess
@@ -208,6 +210,64 @@ int main(){
 '''
 
 
+# The production application stop, the frame continuation of a waiting stop,
+# the close of the router and the modal loop of the window manager.
+SHUTDOWN = r'''
+using IPlayer=CRetroPlayer;
+struct CEvent {void Set(){}};
+struct CSingleExit {explicit CSingleExit(CCriticalSection&) {}};
+struct CApplicationPlayer {
+ mutable CCriticalSection m_playerLock;
+ std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
+ struct {std::shared_ptr<CFileItem> pItem;} m_nextItem;
+ bool m_shutdown=false,m_closeAcknowledged=false,m_waitForPlaybackStop=false;
+ std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
+ enum class Supersession {NONE,OPEN,STOP}; Supersession m_supersededBy=Supersession::NONE;
+ uint64_t m_supersededAt=0,m_intentSequence=0;
+ std::shared_ptr<IPlayer> GetInternal(); std::shared_ptr<const IPlayer> GetInternal()const;
+ bool ClosePlayer(bool=false,std::shared_ptr<CEvent> = {});
+ void ResetPlayer(std::shared_ptr<CEvent> = {}); void ContinueClose();void CompleteCloseCompletions();
+ void Supersede(Supersession);bool HasPlayer()const;
+};
+@ROUTER@
+constexpr int EXITCODE_QUIT=0,EXITCODE_POWERDOWN=1,EXITCODE_REBOOT=2;
+static int powerActions=0;
+struct PowerManager {void Powerdown(){++powerActions;} void Reboot(){++powerActions;}};
+struct CApplication {
+ CApplicationPlayer player;bool m_bStop=false;std::optional<int> m_pendingStop;
+ template<class T>T* GetComponent(){return &player;}
+ bool IsStopPending() const;
+ bool Stop(int exitCode){@STOP@m_bStop=true;return true;}
+ void FrameMove(){player.ContinueClose();@FRAME@}
+} g_application;
+@PENDING@
+struct CallbackLoop {bool GetRenderGUI(){return true;}void Process(){}void FrameMove(bool){g_application.FrameMove();}void Render(){}};
+struct CGUIWindowManager {CallbackLoop* m_pCallback;int m_iNested=0;bool ProcessRenderLoop(bool);};
+@LOOP@
+int main(){
+ // A shutdown during each step of the open that waits in a dialog
+ for(int step=0;step<STEPS;++step){
+  g_application.m_bStop=false;g_application.m_pendingStop.reset();powerActions=0;
+  Callback cb;auto game=std::make_shared<CRetroPlayer>(cb);g_application.player.m_pPlayer=game;
+  g_application.player.m_shutdown=false;
+  CallbackLoop loop;CGUIWindowManager manager{&loop};int frames=0;
+  otherClientSave=true;waitStep=step;
+  waitHook=[&]{
+   assert(!g_application.Stop(EXITCODE_POWERDOWN)&&g_application.m_pendingStop&&!g_application.m_bStop);
+   // the modal loop of the dialog ends at the first frame
+   while(manager.ProcessRenderLoop(false))assert(++frames<100);
+  };
+  assert(!game->OpenFile(CFileItem{},CPlayerOptions{}));
+  assert(frames==0&&cb.started==0&&cb.ended==0);
+  game.reset();
+  g_application.FrameMove();
+  assert(g_application.m_bStop&&!g_application.m_pendingStop&&!g_application.player.HasPlayer()&&powerActions==1);
+ }
+ std::cout<<"RetroPlayer shutdown: PASS (production stop, router close and modal loop; ASan/UBSan)\n";
+}
+'''
+
+
 def compile_run(code):
     with tempfile.TemporaryDirectory(prefix='retroplayer-open-close-') as tmp:
         out = Path(tmp)
@@ -247,6 +307,34 @@ def main():
     for signature in ('void CRetroPlayer::RegisterWindowCallbacks()', 'void CRetroPlayer::UnregisterWindowCallbacks()'):
         render += function(source, signature)
     compile_run(render + player + RENDER_MAIN)
+    # The shutdown during a dialog of the open.
+    app = (ROOT / 'xbmc/application/Application.cpp').read_text()
+    router = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
+    windows = (ROOT / 'xbmc/guilib/GUIWindowManager.cpp').read_text()
+    header = (ROOT / 'xbmc/application/Application.h').read_text()
+    stop = function(app, 'bool CApplication::Stop(')
+    frame = function(app, 'void CApplication::FrameMove(')
+    frame = frame[frame.index('  if (m_pendingStop && !appPlayer->HasPlayer())'):frame.rindex('}')]
+    pending = header[header.index('  bool IsStopPending() const'):]
+    pending = pending[:pending.index('\n')].replace('IsStopPending()', 'CApplication::IsStopPending()').strip()
+    shutdown = SHUTDOWN.replace('@ROUTER@', ''.join(function(router, signature) for signature in (
+        'std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
+        'std::shared_ptr<const IPlayer> CApplicationPlayer::GetInternal() const',
+        'bool CApplicationPlayer::ClosePlayer(', 'void CApplicationPlayer::ResetPlayer(',
+        'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()',
+        'void CApplicationPlayer::Supersede(', 'bool CApplicationPlayer::HasPlayer() const')))
+    shutdown = shutdown.replace('@STOP@', stop[stop.index('  if (m_pendingStop)'):stop.index('  CLog::Log')] +
+                                stop[stop.index('  const auto appPlayer = GetComponent<CApplicationPlayer>();'):
+                                     stop.index('  // Safety net')])
+    shutdown = shutdown.replace('@FRAME@', frame.replace('appPlayer->', 'player.').replace(
+        'CServiceBroker::GetPowerManager()', 'PowerManager{}'))
+    shutdown = shutdown.replace('@PENDING@', pending).replace('@LOOP@', function(windows, 'bool CGUIWindowManager::ProcessRenderLoop('))
+    stopping = prelude.replace('#include <atomic>', '#include <atomic>\n#include <optional>\n#include <vector>', 1)
+    stopping = stopping.replace('struct CServiceBroker {', 'struct Window {CCriticalSection gfx;auto& GetGfxContext(){return gfx;} '
+                                'bool PrepareForShutdown(){return true;}};\nstruct CServiceBroker {static Window* GetWinSystem()'
+                                '{static Window w;return &w;}', 1)
+    stopping = stopping.replace('struct Messenger {int fullscreen=0;', 'struct Messenger {bool IsProcessThread(){return true;} int fullscreen=0;', 1)
+    compile_run(stopping + player + shutdown)
     print('RetroPlayer open/close: PASS (production OpenFile, CloseFile and render registration; ASan/UBSan)')
 
 

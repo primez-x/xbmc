@@ -114,6 +114,8 @@ public:
 
   bool IsInitialized() const { return !m_bInitializing; }
   bool IsStopping() const { return m_bStop; }
+  // A stop waits for the close of the player
+  bool IsStopPending() const { return m_pendingStop.has_value(); }
 
   bool CreateGUI();
   bool InitWindow(RESOLUTION res = RES_INVALID);

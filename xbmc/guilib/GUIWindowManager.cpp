@@ -1533,6 +1533,7 @@ CGUIWindow* CGUIWindowManager::GetWindow(int id) const
 bool CGUIWindowManager::ProcessRenderLoop(bool renderOnly)
 {
   bool renderGui = true;
+  bool stopPending = false;
 
   if (CServiceBroker::GetAppMessenger()->IsProcessThread() && m_pCallback)
   {
@@ -1546,8 +1547,12 @@ bool CGUIWindowManager::ProcessRenderLoop(bool renderOnly)
     }
     m_pCallback->Render();
     m_iNested--;
+    // A stop waits for the close of the player, and the open of a player can wait
+    // in a modal loop of the main thread (the dialogs of a game open): the loop
+    // ends, the open returns, and the close completes
+    stopPending = g_application.IsStopPending();
   }
-  if (g_application.m_bStop || !renderGui)
+  if (g_application.m_bStop || stopPending || !renderGui)
     return false;
   else
     return true;
