@@ -907,6 +907,54 @@ SEEK = r"""
 """
 
 
+# The accepted open adopts the staged stack on the main thread while a seek or a
+# time query on another thread reads the current stack without the lock of the
+# helper (Astra's round 26 probe): the list object of the current stack stays,
+# and the reader sees the adopted items.
+def stack_adopt_program(function):
+    stack = (ROOT / 'xbmc/application/ApplicationStackHelper.cpp').read_text()
+    items = (ROOT / 'xbmc/FileItem.cpp').read_text()
+    size = function(items, 'int CFileItemList::Size() const')
+    # The reader stops after the load of the list pointer, before the list lock.
+    size = size.replace('{', '{\n if(reader){entered=true;while(!resumeReader)std::this_thread::yield();}', 1)
+    return r"""#include <atomic>
+#include <cassert>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+using CCriticalSection=std::recursive_mutex;
+std::atomic<bool> entered{false},resumeReader{false};
+thread_local bool reader=false;
+struct CFileItemList {
+ mutable CCriticalSection m_lock;std::vector<int> m_items;
+ ~CFileItemList(){std::unique_lock<CCriticalSection> lock(m_lock);m_items.clear();}
+ int Size() const;void Clear(){std::unique_lock<CCriticalSection> lock(m_lock);m_items.clear();}
+ void Assign(const CFileItemList& list){std::unique_lock<CCriticalSection> lock(m_lock);m_items=list.m_items;}
+};
+struct CApplicationStackHelper {
+ CCriticalSection m_critSection;std::map<int,int> m_stackmap;
+ std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
+ int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;
+ void Adopt(CApplicationStackHelper&&);bool IsPlayingRegularStack() const;
+};
+""" + size + function(stack, 'void CApplicationStackHelper::Adopt(') + \
+        function(stack, 'bool CApplicationStackHelper::IsPlayingRegularStack() const') + r"""
+int main(){
+ CApplicationStackHelper current,staged;current.m_currentStack->m_items={1};
+ staged.m_currentStack->m_items={1,2};staged.m_currentStackPosition=1;
+ const CFileItemList* list=current.m_currentStack.get();bool playing=false;
+ std::thread seek([&]{reader=true;playing=current.IsPlayingRegularStack();});
+ while(!entered)std::this_thread::yield();
+ current.Adopt(std::move(staged));
+ resumeReader=true;seek.join();
+ assert(playing&&current.m_currentStack.get()==list&&current.m_currentStack->m_items.size()==2);
+ assert(current.m_currentStackPosition==1&&staged.m_currentStack->m_items.empty());
+}
+"""
+
+
 def main():
     source = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
     signatures = ['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()', 'bool CApplicationPlayer::IsPlaying() const',
@@ -1083,7 +1131,9 @@ int main(){""", 1)
     compile_run(base, '')
     compile_run(production_play(code, playlist, function), '-play')
     compile_run(menu_program(play), '-menu')
+    compile_run(stack_adopt_program(function), '-adopt')
     print('PASS production Blu-ray menu: a newer open during the menu supersedes the open, also on cancel')
+    print('PASS production stack adoption: a reader on another thread keeps the list of the current stack')
 
 
 if __name__ == '__main__':

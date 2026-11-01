@@ -38,8 +38,10 @@ void CApplicationStackHelper::Adopt(CApplicationStackHelper&& stack)
   for (auto& registration : stack.m_stackmap)
     m_stackmap[registration.first] = std::move(registration.second);
   stack.m_stackmap.clear();
-  m_currentStack = std::move(stack.m_currentStack);
-  stack.m_currentStack = std::make_unique<CFileItemList>();
+  // Other threads read the current stack without the lock (a seek, the time of
+  // the stack): the list stays, and only the items change, as in a new stack.
+  m_currentStack->Assign(*stack.m_currentStack);
+  stack.m_currentStack->Clear();
   m_currentStackPosition = stack.m_currentStackPosition;
   m_currentStackIsDiscImageStack = stack.m_currentStackIsDiscImageStack;
 }
