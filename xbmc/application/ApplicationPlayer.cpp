@@ -936,7 +936,8 @@ void CApplicationPlayer::SetPlaySpeed(float speed)
   if (!IsPlayingAudio() && !IsPlayingVideo())
     return ;
 
-  SetSpeed(speed);
+  // the player that the reset took: a newer player after a close keeps its speed
+  player->SetSpeed(speed);
 }
 
 float CApplicationPlayer::GetPlaySpeed() const

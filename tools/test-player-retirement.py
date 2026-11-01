@@ -95,7 +95,8 @@ CONTROLS_PLAYER = '''
   void SetMute(bool){++controls;}void SetVolume(float){++controls;}bool OnAction(const CAction&){++controls;return true;}'''
 CONTROLS_ROUTER = '''
   std::shared_ptr<IPlayer> GetControllable();
-  bool IsPlaying()const;bool IsPlayingAudio()const{return false;}bool IsPlayingVideo()const{return IsPlaying();}
+  bool IsPlaying()const;bool IsPlayingAudio()const{return false;}mutable std::function<void()> queryHook;
+  bool IsPlayingVideo()const{if(queryHook){auto hook=std::move(queryHook);hook();}return IsPlaying();}
   int64_t GetTime()const{return 0;}
   void Pause();void Seek(bool,bool=false,bool=false);void SeekPercentage(float);int SeekChapter(int);
   bool SeekScene(bool);void SeekTime(int64_t);void SeekTimeRelative(int64_t);void SetSpeed(float);
@@ -131,6 +132,19 @@ static void controls_during_close(){
   all();
   assert(current->controls==14&&old->controls==14);
 }
+// The speed reset of an open takes the player once: the close of the player and
+// a newer open during the reset do not move the reset to the newer player.
+static void speed_after_replacement(){
+  CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
+  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+  app.queryHook=[&]{
+    app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
+    CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
+    old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);};
+  app.SetPlaySpeed(1);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1);
+}
 // A stopped player that closes is not playing. A newer open that waits for the
 // close continues the playback, like an open in progress.
 static void state_during_close(){
@@ -156,6 +170,7 @@ static void state_during_close(){
 int main(){
   state_during_close();
   controls_during_close();
+  speed_after_replacement();
   shutdown_cases();
   discarded_notifications();
   CFileItem file;file.id=1;CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
