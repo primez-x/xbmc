@@ -85,13 +85,14 @@ HARNESS = HARNESS.replace(
     '  if(abandon)return false;\n'
     '  const auto appPlayer=&player;@CANCELLED@Acceptance(item,bRestart);\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback,intent);@CANCELLED@Accept(bRestart,playlistItem);return ret;}\n'
-    ' bool Ended();void EndOpen(uint64_t intent);void Acceptance(CFileItem& item,bool bRestart);\n void Frame(){')
+    ' bool Ended();bool Stopped();void EndOpen(uint64_t intent);void Acceptance(CFileItem& item,bool bRestart);\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
 bool CApplication::PlayFile(CFileItem item,const std::string& player,bool bRestart,bool playlistItem,uint64_t attempt){@PLAYFILE@}
 @ENDOPEN@
 bool CApplication::Ended(){switch(GUI_MSG_PLAYBACK_ENDED){@ENDED@}return false;}
+bool CApplication::Stopped(){switch(GUI_MSG_PLAYBACK_STOPPED){@STOPPED@}return false;}
 bool CPlayListPlayer::Terminal(int id){CGUIMessage message(id,0,0);switch(message.GetMessage()){@PLAYLISTTERMINAL@}return false;}
 void CApplication::Intent([[maybe_unused]] CFileItem item,bool bRestart,bool playlistItem){
  @ENDPLAYLIST@@INTENT@}
@@ -136,6 +137,24 @@ int main(){
   assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==42);
   assert(CServiceBroker::pvr.ended==0&&CServiceBroker::gui.wm.threadMessages==0);
   opensLatest(app,old);}
+ // A remote player reports the stop when the close starts, before the renderer
+ // stops: the stop keeps the newer open and the playlist.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;
+  replace(app);app.Stopped();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==42&&app.player.m_closingPlayer==old);
+  assert(CServiceBroker::gui.wm.threadMessages==0&&CServiceBroker::playlist.m_iCurrentPlayList!=TYPE_NONE);
+  assert(CServiceBroker::pvr.stopped==1&&CServiceBroker::pvr.ended==0);
+  opensLatest(app,old);}
+ // After a stop, the remote player reports the stop before the renderer stops:
+ // the window stays until the close of the player completes.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;
+  app.StopPlaying();app.Stopped();
+  assert(app.player.m_closingPlayer==old&&CServiceBroker::gui.wm.previous==0);
+  app.Frame();assert(app.player.m_closingPlayer==old&&CServiceBroker::gui.wm.previous==0);
+  old->canClose=true;app.Frame();
+  assert(!app.player.HasPlayer()&&CServiceBroker::gui.wm.previous==1);}
  // A normal end still continues the playlist and the EPG autoplay.
  {CApplication app;begin(app);reset();app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
   assert(CServiceBroker::pvr.ended==1&&CServiceBroker::pvr.stopped==0);
@@ -764,6 +783,8 @@ def main():
     code = code.replace('@PLAYNEXT@', function(playlist, 'bool CPlayListPlayer::PlayNext('))
     code = code.replace('@ENDED@', application[application.index('  case GUI_MSG_PLAYBACK_ENDED:'):
                                                application.index('  case GUI_MSG_PLAYLISTPLAYER_STOPPED:')])
+    code = code.replace('@STOPPED@', application[application.index('  case GUI_MSG_PLAYBACK_STOPPED:'):
+                                                 application.index('  case GUI_MSG_PLAYBACK_ENDED:')])
     terminal = min(playlist.find(case) for case in ('  case GUI_MSG_PLAYBACK_ENDED:', '  case GUI_MSG_PLAYBACK_STOPPED:')
                    if case in playlist)
     code = code.replace('@PLAYLISTTERMINAL@', playlist[terminal:playlist.index('  case GUI_MSG_PLAYBACK_STARTED:')])

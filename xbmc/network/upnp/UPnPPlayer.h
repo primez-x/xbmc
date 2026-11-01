@@ -61,13 +61,9 @@ public:
 
 private:
   bool IsPaused() const;
-  // Starts a new open; the waits of the older open end
-  uint64_t AdvanceOpen();
+  // Ends an open in progress; the waits of the open end
+  void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
-  // An open publishes the transport state of the renderer and starts a new epoch
-  void PublishTransportInfo(const CUPnPCommand& info);
-  // The worker polls the transport state when send is true
-  void PollTransportInfo(bool send);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -82,15 +78,13 @@ private:
   std::string m_current_meta;
   std::atomic<bool> m_started{false};
   std::atomic<bool> m_stopremote{false};
-  // The current open; a newer open and a close advance the sequence
+  // The current open; a close advances the sequence
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting; // the commands that an open waits for
-  // The published transport state, the poll and the epoch; the end claim of the worker
-  CCriticalSection m_stateSection;
-  std::shared_ptr<CUPnPCommand> m_poll;
-  uint64_t m_pollEpoch{0};
-  uint64_t m_stateEpoch{0};
+  // The Stop of the close and the end of the wait for the answer
+  std::shared_ptr<CUPnPCommand> m_stop;
+  XbmcThreads::EndTime<> m_stopTimeout;
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;

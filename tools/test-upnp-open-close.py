@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Execute the production CUPnPPlayer open/close methods against a recording renderer.
 
-Extracts WaitOnEvent, PlayFile, OpenFile, CloseFile and the destructor from
-xbmc/network/upnp/UPnPPlayer.cpp and splices them into a C++ prelude with stub
-Platinum/Neptune types. The fake renderer records every command in order and
-answers each command inside the next busy-dialog wait. A hook runs inside that
-wait, as the GUI/application message pump does, and closes the player or starts a
-newer player on the same renderer. The Platinum stack, threads and the real GUI
-are not simulated. Requires Python 3 and g++; runs with ASan/UBSan.
+Extracts WaitOnEvent, PlayFile, OpenFile, CloseFile, the destructor and one pass
+of the worker loop from xbmc/network/upnp/UPnPPlayer.cpp and splices them into a
+C++ prelude with stub Platinum/Neptune types. The fake renderer records every
+command in order and answers each command inside the next busy-dialog wait, or
+between two frames of the application. A hook runs inside that wait, as the
+GUI/application message pump does, and closes the player or starts a newer player
+on the same renderer. The application calls CloseFile once each frame until the
+close completes. The Platinum stack, threads and the real GUI are not simulated.
+Requires Python 3 and g++; runs with ASan/UBSan.
 """
 import argparse
 import os
@@ -22,8 +24,6 @@ function = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['
 
 PRELUDE = r'''
 #include <algorithm>
-#include <condition_variable>
-#include <thread>
 #include <atomic>
 #include <cstdint>
 #include <chrono>
@@ -220,6 +220,8 @@ struct PLT_MediaController {
   };
   std::vector<Pending> pending;
   std::function<void(const std::string&)> cmdHook;
+  std::string sendFails;  // the controller does not send the next command of this name
+  void* failedUserdata = nullptr;  // the userdata of the command that was not sent
   NPT_Result Send(PLT_DeviceDataReference& device, void* userdata, const char* cmd,
                   std::function<void(PLT_MediaControllerDelegate&)> answer, int delay = 0);
   NPT_Result FindBestResource(PLT_DeviceDataReference&, PLT_MediaObject&, NPT_Cardinal& i) {
@@ -252,24 +254,24 @@ public:
   CUPnPPlayerController(PLT_MediaController* c, const char* n) : m_control(c), name(n) {
     m_device.owner = this;
   }
-  // Hooks of the thread case: after the worker reads the state, after an open
-  // publishes a state.
-  static inline std::function<void()> afterStateRead;
-  static inline std::function<void(const PLT_TransportInfo&)> afterPublish;
-  NPT_String GetTransportState() const {
-    NPT_String state = m_trainfo.cur_transport_state;
-    if (afterStateRead)
-      afterStateRead();
-    return state;
-  }
+  NPT_String GetTransportState() const { return m_trainfo.cur_transport_state; }
   NPT_String GetTransportStatus() const { return m_trainfo.cur_transport_status; }
-  void SetTransportInfo(const PLT_TransportInfo& info) {
-    m_trainfo = info;
-    if (afterPublish)
-      afterPublish(info);
+  void SetTransportInfo(const PLT_TransportInfo& info) { m_trainfo = info; }
+  // The worker polls the renderer with the controller as the userdata
+  void OnGetTransportInfoResult(NPT_Result res, PLT_DeviceDataReference&, PLT_TransportInfo* info,
+                                void*) override {
+    if (NPT_FAILED(res))
+      m_trainfo.cur_transport_state = "STOPPED";
+    else
+      m_trainfo = *info;
   }
-  bool pollDue = false;  // the position poll finds the transport poll due
-  bool UpdatePositionInfo() { return std::exchange(pollDue, false); }
+  bool pollDue = false;  // the worker polls the renderer
+  void UpdatePositionInfo() {
+    if (!std::exchange(pollDue, false))
+      return;
+    m_control->GetTransportInfo(m_device, m_instance, this);
+    m_control->GetPositionInfo(m_device, m_instance, this);
+  }
   PLT_MediaController* m_control;
   PLT_DeviceDataReference m_device;
   NPT_UInt32 m_instance = 0;
@@ -284,6 +286,7 @@ public:
   std::string uri;      // the URI of the last SetAVTransportURI
   std::string nextState;  // the state of the next GetTransportInfo answer, once
   bool playUnanswered = false;  // the renderer never answers Play
+  bool stopUnanswered = false;  // the renderer never answers Stop
 };
 
 NPT_Result PLT_MediaController::Send(PLT_DeviceDataReference& device, void* userdata,
@@ -291,6 +294,11 @@ NPT_Result PLT_MediaController::Send(PLT_DeviceDataReference& device, void* user
                                      std::function<void(PLT_MediaControllerDelegate&)> answer,
                                      int delay) {
   log.push_back(device.owner->name + ":" + cmd);
+  if (sendFails == cmd) {
+    sendFails.clear();
+    failedUserdata = userdata;
+    return NPT_FAILURE;
+  }
   if (answer)
     pending.push_back({userdata, delay, answer});
   if (cmdHook) {
@@ -321,6 +329,8 @@ NPT_Result PLT_MediaController::Stop(PLT_DeviceDataReference& device, NPT_UInt32
   if (result == NPT_SUCCESS)
     r->infoCalls = 0;
   const int delay = std::exchange(r->stopDelay, 0);
+  if (r->stopUnanswered)
+    return Send(device, userdata, "Stop", nullptr);
   return Send(device, userdata, "Stop", [device, result](PLT_MediaControllerDelegate& d) {
     auto dev = device;
     d.OnStopResult(result, dev, nullptr);
@@ -350,6 +360,7 @@ NPT_Result PLT_MediaController::Play(PLT_DeviceDataReference& device, NPT_UInt32
 
 PLT_MediaController g_ctl;
 std::vector<void*> g_userdata;  // the Platinum userdata registry
+std::vector<void*> g_unregistered;  // every userdata that left the registry
 bool Registered(void* userdata) {
   return std::find(g_userdata.begin(), g_userdata.end(), userdata) != g_userdata.end();
 }
@@ -361,16 +372,16 @@ public:
     : m_control(&g_ctl),
       m_delegate(std::make_unique<CUPnPPlayerController>(&g_ctl, name)),
       m_callback(cb),
-      m_logger(std::make_shared<LoggerImpl>()) {}
+      m_logger(std::make_shared<LoggerImpl>()) {
+    CUPnP::RegisterUserdata(m_delegate.get());
+  }
   ~CUPnPPlayer();
   bool OpenFile(const CFileItem& file, const CPlayerOptions& options);
   bool CloseFile(bool reopen = false);
   int PlayFile(const CFileItem& file, const CPlayerOptions& options, XbmcThreads::EndTime<>& timeout,
                uint64_t open);
-  uint64_t AdvanceOpen();
+  void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
-  void PublishTransportInfo(const CUPnPCommand& info);
-  void PollTransportInfo(bool send);
   bool IsRunning() const { return running; }
   void Create() { ++creates; running = true; }
   void StopThread(bool) { running = false; }
@@ -388,21 +399,26 @@ public:
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting;
-  CCriticalSection m_stateSection;
-  std::shared_ptr<CUPnPCommand> m_poll;
-  uint64_t m_pollEpoch{0};
-  uint64_t m_stateEpoch{0};
+  std::shared_ptr<CUPnPCommand> m_stop;
+  XbmcThreads::EndTime<> m_stopTimeout;
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;
   Logger m_logger;
   int creates = 0;
   bool running = false;
+  // destroyed after the destructor body, before the other members: the worker
+  // must not run with destroyed members
+  struct ThreadCheck {
+    CUPnPPlayer* player;
+    ~ThreadCheck() { CHECK(!player->running); }
+  } m_threadCheck{this};
 };
 }  // namespace UPNP
 
 void CUPnP::RegisterUserdata(void* userdata) { UPNP::g_userdata.push_back(userdata); }
 void CUPnP::UnregisterUserdata(void* userdata) {
+  UPNP::g_unregistered.push_back(userdata);
   auto& v = UPNP::g_userdata;
   v.erase(std::remove(v.begin(), v.end(), userdata), v.end());
 }
@@ -471,6 +487,17 @@ std::vector<std::string> Head(std::vector<std::string> v, size_t n) {
   v.resize(n);
   return v;
 }
+// The application calls CloseFile once each frame until the close completes; the
+// renderer answers between two frames. Returns the number of frames.
+int Close(CUPnPPlayer& p) {
+  int frames = 1;
+  while (!p.CloseFile()) {
+    CHECK(frames < 100);  // the close never completes
+    DeliverPending();
+    ++frames;
+  }
+  return frames;
+}
 
 void normal_open_close() {
   Begin("normal open then close");
@@ -481,10 +508,12 @@ void normal_open_close() {
     CHECK(p.OpenFile(Item(), CPlayerOptions()));
     ExpectLog(want);
     CHECK(cb.started == 1 && cb.avstarted == 1 && p.creates == 1 && p.m_started);
-    CHECK(p.CloseFile());
+    // the item starts with the last state of the open
+    CHECK(p.m_delegate->GetTransportState() == "PLAYING");
+    Close(p);
     want.push_back("P:Stop");
     ExpectLog(want);
-    CHECK(cb.stopped == 1);
+    CHECK(cb.stopped == 1 && cb.ended == 0);
   }
   ExpectLog(want);  // the destructor must not stop a second time
   CHECK(cb.stopped == 1);
@@ -496,28 +525,25 @@ void close_twice() {
   {
     CUPnPPlayer p(cb, "P");
     CHECK(p.OpenFile(Item(), CPlayerOptions()));
-    CHECK(p.CloseFile());
+    Close(p);
     CHECK(p.CloseFile());
   }
-  CHECK(Count("P:Stop") == 1);
+  CHECK(Count("P:Stop") == 1 && cb.stopped == 1);
 }
 
-void reopen() {
-  Begin("reopen after close");
+// The close does not wait for the renderer: the close sends Stop once and
+// completes after the answer, in a later frame.
+void close_without_wait() {
+  Begin("close without a wait for the renderer");
   IPlayerCallback cb;
-  {
-    CUPnPPlayer p(cb, "P");
-    CHECK(p.OpenFile(Item(), CPlayerOptions()));
-    CHECK(p.CloseFile(true));
-    CHECK(p.OpenFile(Item(), CPlayerOptions()));
-    CHECK(cb.started == 2 && cb.avstarted == 2 && p.creates == 2);
-  }
-  auto want = Of("P", NORMAL);
-  want.push_back("P:Stop");
-  for (auto& s : Of("P", NORMAL))
-    want.push_back(s);
-  want.push_back("P:Stop");
-  ExpectLog(want);
+  CUPnPPlayer p(cb, "P");
+  CHECK(p.OpenFile(Item(), CPlayerOptions()));
+  CHECK(!p.CloseFile());
+  CHECK(!p.CloseFile());
+  CHECK(Count("P:Stop") == 1 && !g_ctl.pending.empty() && p.running);
+  DeliverPending();
+  CHECK(p.CloseFile());
+  CHECK(Count("P:Stop") == 1 && cb.stopped == 1 && !p.running);
 }
 
 void close_inside_wait() {
@@ -533,10 +559,11 @@ void close_inside_wait() {
         if (w != int(n))
           return;
         g_waitHook = nullptr;
-        CHECK(p.CloseFile());
+        CHECK(p.CloseFile() == (n < 3));
       };
       CHECK(!p.OpenFile(Item(), CPlayerOptions()));
       CHECK(cb.Total() == 0 && p.creates == 0 && !p.running);
+      Close(p);
       ExpectLog(want);
     }
     ExpectLog(want);  // the destructor sends nothing
@@ -558,16 +585,19 @@ void close_inside_wait_renderer_playing() {
         if (w != int(n))
           return;
         g_waitHook = nullptr;
-        CHECK(p.CloseFile());
+        p.CloseFile();
       };
       CHECK(!p.OpenFile(Item(), CPlayerOptions()));
       CHECK(cb.Total() == 0 && p.creates == 0);
+      Close(p);
       ExpectLog(want);
     }
     ExpectLog(want);
   }
 }
 
+// The application replaces a remote player: the newer player opens after the
+// close of the older player completes.
 void newer_player_on_same_renderer() {
   for (size_t n : {size_t(1), size_t(3)}) {
     Begin("newer player starts inside wait " + std::to_string(n));
@@ -578,7 +608,7 @@ void newer_player_on_same_renderer() {
       if (w != int(n))
         return;
       g_waitHook = nullptr;
-      CHECK(a->CloseFile());
+      Close(*a);
       CHECK(b->OpenFile(Item(), CPlayerOptions()));
     };
     CHECK(!a->OpenFile(Item(), CPlayerOptions()));
@@ -597,49 +627,23 @@ void newer_player_on_same_renderer() {
   }
 }
 
-// The application reuses a playing remote player for a newer open. A newer open
-// that starts inside a wait of an older open on the same player owns the renderer.
-void newer_open_on_same_player() {
-  for (int n = 1; n <= 4; ++n) {
-    Begin("newer open on the same player inside wait " + std::to_string(n));
-    IPlayerCallback cb;
-    CUPnPPlayer p(cb, "P");
-    CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
-    g_ctl.log.clear();
-    g_waits = 0;
-    g_waitHook = [&](int w) {
-      if (w != n)
-        return;
-      g_waitHook = nullptr;
-      CHECK(p.OpenFile(Item("http://server/newer.mkv"), CPlayerOptions()));
-    };
-    CHECK(!p.OpenFile(Item("http://server/older.mkv"), CPlayerOptions()));
-    // the older open sends no command after the newer open
-    CHECK(p.m_delegate->uri == "http://server/newer.mkv");
-    CHECK(g_ctl.log.back() == "P:GetMediaInfo");
-    CHECK(cb.started == 2 && cb.avstarted == 2 && cb.stopped == 0);
-    CHECK(p.CloseFile());
-    CHECK(Count("P:Stop") >= 1 && g_ctl.log.back() == "P:Stop");
-  }
-}
-
-// A rejected Stop leaves the renderer playing for this player: the next close
-// stops the renderer again.
-void rejected_stop() {
-  Begin("rejected stop after an open");
+// A refused Stop completes the close once: the renderer decides to keep playing.
+// The close does not stop the renderer again in each frame.
+void refused_stop() {
+  Begin("refused stop after an open");
   IPlayerCallback cb;
   {
     CUPnPPlayer p(cb, "P");
     CHECK(p.OpenFile(Item(), CPlayerOptions()));
     p.m_delegate->stopRejects = 1;
-    CHECK(!p.CloseFile());
+    CHECK(Close(p) == 2);
     CHECK(p.CloseFile());
-    CHECK(p.CloseFile());
+    CHECK(cb.stopped == 1 && !p.running);
   }
-  CHECK(Count("P:Stop") == 2);
+  CHECK(Count("P:Stop") == 1);
 
-  // The answer of Play arrives during the wait of the close for the Stop, and the
-  // renderer rejects the Stop later: the answer of Play is not the answer of Stop.
+  // The answer of Play arrives during the close, and the renderer refuses the
+  // Stop later: the answer of Play is not the answer of Stop.
   Begin("late answer of Play during the stop of a close");
   {
     CUPnPPlayer p(cb, "P");
@@ -652,25 +656,76 @@ void rejected_stop() {
       CHECK(!p.CloseFile());
     };
     CHECK(!p.OpenFile(Item(), CPlayerOptions()));
-    CHECK(p.CloseFile());
+    DeliverPending();  // the answer of Play
+    CHECK(!p.CloseFile());
+    DeliverPending();  // the answer of Stop
     CHECK(p.CloseFile());
   }
-  CHECK(Count("P:Stop") == 2);
+  CHECK(Count("P:Stop") == 1);
+}
 
-  Begin("rejected stop during an open");
+// A renderer that never answers Stop does not keep the close: the close
+// completes at the deadline.
+void unanswered_stop() {
+  Begin("renderer never answers Stop");
+  IPlayerCallback cb;
   {
     CUPnPPlayer p(cb, "P");
-    g_waitHook = [&](int w) {
-      if (w != 3)  // the wait for the answer to Play
-        return;
-      g_waitHook = nullptr;
-      p.m_delegate->stopRejects = 1;
-      CHECK(!p.CloseFile());
-    };
-    CHECK(!p.OpenFile(Item(), CPlayerOptions()));
-    CHECK(p.CloseFile());
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    p.m_delegate->stopUnanswered = true;
+    CHECK(Close(p) > 2);
+    CHECK(cb.stopped == 1 && !p.running);
   }
-  CHECK(Count("P:Stop") == 2);
+  CHECK(Count("P:Stop") == 1);
+}
+
+// The worker and the close report one end of the item between them.
+void one_end_notification() {
+  Begin("the worker sees the stop of the close");
+  {
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(!p.CloseFile());
+    DeliverPending();
+    // the worker polls the stopped renderer before the close completes
+    p.m_delegate->pollDue = true;
+    p.WorkerStep();
+    DeliverPending();
+    CHECK(p.m_delegate->GetTransportState() == "STOPPED");
+    p.WorkerStep();
+    CHECK(p.CloseFile());
+    CHECK(cb.stopped == 1 && cb.ended == 0);
+  }
+  Begin("the item ends before the close");
+  {
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    p.m_delegate->nextState = "STOPPED";
+    p.m_delegate->pollDue = true;
+    p.WorkerStep();
+    DeliverPending();
+    p.WorkerStep();
+    CHECK(cb.ended == 1);
+    p.WorkerStep();
+    Close(p);
+    CHECK(cb.ended == 1 && cb.stopped == 0);
+  }
+}
+
+// The destructor of a player in a close stops the worker before the members end.
+void destroy_during_close() {
+  Begin("destroy a player in a close");
+  IPlayerCallback cb;
+  {
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(!p.CloseFile());
+  }
+  CHECK(Count("P:Stop") == 1);
+  while (!g_ctl.pending.empty())
+    DeliverPending();  // the answer reaches the command, not the destroyed player
 }
 
 // The wait for PLAYING reads the answer of the command that the wait sent, not
@@ -686,75 +741,6 @@ void transitioning_renderer() {
   CHECK(cb.started == 1);
   ExpectLog(Of("P", {"GetTransportInfo", "SetAVTransportURI", "Play", "GetTransportInfo",
                      "GetTransportInfo", "GetPositionInfo", "GetMediaInfo"}));
-}
-
-// An open of a playing player replaces the item: the stop of the renderer during
-// the open is not the end of the replaced item. A failed open reports the stop.
-void reopen_notifications() {
-  for (const bool fail : {false, true}) {
-    Begin(fail ? "failed reopen of a playing player" : "reopen of a playing player");
-    IPlayerCallback cb;
-    CUPnPPlayer p(cb, "P");
-    CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
-    p.m_delegate->m_trainfo.cur_transport_state = "PLAYING";
-    p.m_delegate->firstState = "PLAYING";
-    p.m_delegate->infoCalls = 0;
-    p.m_delegate->uriRejects = fail ? 1 : 0;
-    g_waitHook = [&](int) {
-      // the worker polled the renderer that the open stopped
-      if (Count("P:Stop") == 1) {
-        p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
-        p.WorkerStep();
-      }
-    };
-    CHECK(p.OpenFile(Item("http://server/next.mkv"), CPlayerOptions()) == !fail);
-    g_waitHook = nullptr;
-    CHECK(cb.ended == 0);
-    // the open published the state of the renderer: the new item plays
-    if (!fail)
-      CHECK(p.m_delegate->GetTransportState() == "PLAYING");
-    else
-      p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
-    p.WorkerStep();
-    CHECK(cb.ended == 0);
-    CHECK(cb.started == (fail ? 1 : 2) && cb.stopped == (fail ? 1 : 0));
-    if (!fail) {
-      // the end of the new item
-      p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
-      p.WorkerStep();
-      p.WorkerStep();
-      CHECK(cb.ended == 1 && cb.stopped == 0);
-    }
-  }
-}
-
-// A worker poll sent before an open and answered after the open does not
-// replace the state that the open published.
-void stale_poll() {
-  Begin("poll answered after a reopen");
-  IPlayerCallback cb;
-  CUPnPPlayer p(cb, "P");
-  CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
-  CHECK(p.m_delegate->GetTransportState() == "PLAYING");
-  // the worker sends a poll; the renderer answers STOPPED, two rounds late
-  p.m_delegate->nextState = "STOPPED";
-  p.m_delegate->pollDue = true;
-  p.WorkerStep();
-  CHECK(g_ctl.log.back() == "P:GetTransportInfo");
-  g_ctl.pending.back().delay = 1;
-  p.m_delegate->firstState = "PLAYING";
-  p.m_delegate->infoCalls = 0;
-  CHECK(p.OpenFile(Item("http://server/next.mkv"), CPlayerOptions()));
-  CHECK(g_ctl.pending.empty());  // the poll was answered during the open
-  p.WorkerStep();
-  CHECK(p.m_delegate->GetTransportState() == "PLAYING" && cb.ended == 0);
-  // a poll sent after the open publishes the state
-  p.m_delegate->nextState = "STOPPED";
-  p.m_delegate->pollDue = true;
-  p.WorkerStep();
-  DeliverPending();
-  p.WorkerStep();
-  CHECK(p.m_delegate->GetTransportState() == "STOPPED" && cb.ended == 1);
 }
 
 // A command lives until the renderer answers the command, also after the wait
@@ -779,8 +765,36 @@ void abandoned_command() {
   while (!g_ctl.pending.empty())
     DeliverPending();
   CHECK(Registered(abandoned));
-  // the answered command is freed later; the player opens again
-  CHECK(p.OpenFile(Item(), CPlayerOptions()));
+  // a newer command frees the answered command
+  CUPnPPlayer q(cb, "Q");
+  CHECK(q.OpenFile(Item(), CPlayerOptions()));
+  CHECK(!Registered(abandoned));
+}
+
+// A command that the controller did not send has no answer to come: a newer
+// command frees the command.
+void failed_send() {
+  for (const char* command : {"GetTransportInfo", "Stop"}) {
+    Begin(std::string("controller does not send ") + command);
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    g_ctl.failedUserdata = nullptr;
+    if (std::string(command) == "Stop") {
+      CHECK(p.OpenFile(Item(), CPlayerOptions()));
+      g_ctl.sendFails = command;
+      CHECK(p.CloseFile());  // nothing to wait for
+      CHECK(cb.stopped == 1);
+    } else {
+      g_ctl.sendFails = command;
+      CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    }
+    void* const failed = g_ctl.failedUserdata;
+    CHECK(failed && Registered(failed));
+    g_unregistered.clear();
+    CUPnPPlayer q(cb, "Q");
+    CHECK(q.OpenFile(Item(), CPlayerOptions()));
+    CHECK(std::find(g_unregistered.begin(), g_unregistered.end(), failed) != g_unregistered.end());
+  }
 }
 
 // A close ends the wait of an open, also when the renderer never answers the
@@ -795,70 +809,15 @@ void close_unanswered_wait() {
       if (w != 3)  // the wait for the answer to Play
         return;
       g_waitHook = nullptr;
-      CHECK(p.CloseFile());
+      CHECK(!p.CloseFile());
     };
     CHECK(!p.OpenFile(Item(), CPlayerOptions()));
     CHECK(cb.Total() == 0 && p.creates == 0);
+    Close(p);
   }
   auto want = Of("P", Head(NORMAL, 3));
   want.push_back("P:Stop");
   ExpectLog(want);
-}
-
-// The worker thread reads STOPPED during the reopen of Y and pauses before the
-// worker claims the end; Y then completes. The end of the replaced item X must
-// not take the started state of Y. Each wait is timed: the claim and the state
-// changes of the open can exclude each other, which ends a wait by the timeout.
-void worker_end_during_reopen() {
-  Begin("worker end claim during a reopen");
-  IPlayerCallback cb;
-  CUPnPPlayer p(cb, "P");
-  CHECK(p.OpenFile(Item("http://server/X.mkv"), CPlayerOptions()));
-  std::mutex gate;
-  std::condition_variable changed;
-  bool entered = false, stoppedPublished = false, stoppedRead = false, reopened = false;
-  const auto wait = [&](std::unique_lock<std::mutex>& lock, const bool& flag) {
-    changed.wait_for(lock, std::chrono::milliseconds(300), [&] { return flag; });
-  };
-  g_workerEntered = [&] {
-    std::unique_lock<std::mutex> lock(gate);
-    entered = true;
-    changed.notify_all();
-    wait(lock, stoppedPublished);
-  };
-  CUPnPPlayerController::afterStateRead = [&] {
-    std::unique_lock<std::mutex> lock(gate);
-    stoppedRead = true;
-    changed.notify_all();
-    wait(lock, reopened);
-  };
-  CUPnPPlayerController::afterPublish = [&](const PLT_TransportInfo& info) {
-    if (info.cur_transport_state != "STOPPED")
-      return;
-    std::unique_lock<std::mutex> lock(gate);
-    stoppedPublished = true;
-    changed.notify_all();
-    wait(lock, stoppedRead);
-  };
-  std::thread worker([&] { p.WorkerStep(); });
-  {
-    std::unique_lock<std::mutex> lock(gate);
-    wait(lock, entered);
-  }
-  // the renderer stopped X; the first answer of the reopen reports STOPPED
-  p.m_delegate->nextState = "STOPPED";
-  CHECK(p.OpenFile(Item("http://server/Y.mkv"), CPlayerOptions()));
-  {
-    std::unique_lock<std::mutex> lock(gate);
-    reopened = true;
-    changed.notify_all();
-  }
-  worker.join();
-  g_workerEntered = nullptr;
-  CUPnPPlayerController::afterStateRead = nullptr;
-  CUPnPPlayerController::afterPublish = nullptr;
-  CHECK(p.m_delegate->uri == "http://server/Y.mkv");
-  CHECK(p.m_started && cb.ended == 0);
 }
 
 void close_during_last_command() {
@@ -871,13 +830,14 @@ void close_during_last_command() {
     g_ctl.cmdHook = [&](const std::string& c) {
       if (c == "P:Seek") {
         g_ctl.cmdHook = nullptr;
-        CHECK(p.CloseFile());
+        CHECK(!p.CloseFile());
       }
     };
     CPlayerOptions options;
     options.starttime = 10;
     CHECK(!p.OpenFile(Item(), options));
     CHECK(cb.Total() == 0 && p.creates == 0 && !p.running);
+    Close(p);
   }
   auto want = Of("P", Head(NORMAL, 4));
   want.push_back("P:Seek");
@@ -894,7 +854,7 @@ void attach() {
     CHECK(p.OpenFile(Item(""), CPlayerOptions()));
     CHECK(cb.started == 1 && cb.avstarted == 1 && p.creates == 1);
     ExpectLog(Of("P", {"GetTransportInfo", "GetPositionInfo", "GetMediaInfo"}));
-    CHECK(p.CloseFile());
+    Close(p);
     CHECK(Count("P:Stop") == 1);
   }
   CHECK(Count("P:Stop") == 1);
@@ -923,24 +883,14 @@ void attach() {
   ExpectLog(Of("P", {"GetTransportInfo"}));
 }
 
+#define CASES(X) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
+  X(close_inside_wait_renderer_playing) X(newer_player_on_same_renderer) X(refused_stop) \
+  X(unanswered_stop) X(one_end_notification) X(destroy_during_close) X(transitioning_renderer) \
+  X(abandoned_command) X(failed_send) X(close_unanswered_wait) X(close_during_last_command) \
+  X(attach)
 int main(int argc, char** argv) {
-  const std::vector<std::pair<const char*, void (*)()>> cases = {
-      {"normal_open_close", normal_open_close},
-      {"close_twice", close_twice},
-      {"reopen", reopen},
-      {"close_inside_wait", close_inside_wait},
-      {"close_inside_wait_renderer_playing", close_inside_wait_renderer_playing},
-      {"newer_player_on_same_renderer", newer_player_on_same_renderer},
-      {"newer_open_on_same_player", newer_open_on_same_player},
-      {"rejected_stop", rejected_stop},
-      {"transitioning_renderer", transitioning_renderer},
-      {"reopen_notifications", reopen_notifications},
-      {"stale_poll", stale_poll},
-      {"abandoned_command", abandoned_command},
-      {"close_unanswered_wait", close_unanswered_wait},
-      {"worker_end_during_reopen", worker_end_during_reopen},
-      {"close_during_last_command", close_during_last_command},
-      {"attach", attach}};
+#define ENTRY(name) {#name, name},
+  const std::vector<std::pair<const char*, void (*)()>> cases = {CASES(ENTRY)};
   if (argc > 1) {
     for (auto& c : cases)
       if (std::string(c.first) == argv[1]) {
@@ -962,38 +912,38 @@ CONTROLS = [
      'if (open != m_openSequence)\n  {\n    m_logger->debug', 'if (false)\n  {\n    m_logger->debug'),
     ('Play does not mark the renderer as started',
      '    m_stopremote = true;\n    NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '    NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
-    ('OpenFile does not start a new open',
-     'const uint64_t open = AdvanceOpen();', 'const uint64_t open = m_openSequence;'),
     ('OpenFile does not check the open sequence before starting',
      'if (open != m_openSequence)\n    goto failed;', 'if (false)\n    goto failed;'),
     ('CloseFile does not end the open',
-     '  AdvanceOpen();\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
-    ('a new open does not end the waits of the older open',
+     '  CancelOpen();\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
+    ('a close does not end the waits of the open',
      '    command->m_event.Set();\n', '    (void)command;\n'),
-    ('CloseFile can stop the renderer twice',
-     '    m_stopremote = false;\n  }', '  }'),
-    ('CloseFile drops the renderer before the stop succeeds',
-     'if (m_stopremote)\n  {\n    const auto stop', 'if (m_stopremote.exchange(false))\n  {\n    const auto stop'),
     ('all commands share one answer',
      'CEvent m_event;\n  NPT_Result m_status = NPT_FAILURE;',
      'static inline CEvent m_event;\n  static inline NPT_Result m_status = NPT_FAILURE;'),
     ('a command is freed before the answer arrives',
      'return commands->emplace_back(std::make_shared<CUPnPCommand>());',
      'return std::make_shared<CUPnPCommand>();'),
-    ('the open does not publish the state of the renderer',
-     '  m_delegate->SetTransportInfo(info.m_trainfo);\n  ++m_stateEpoch;', '  ++m_stateEpoch;'),
-    ('a poll sent before the state of an open replaces the state',
-     'if (m_pollEpoch == m_stateEpoch)', 'if (true)'),
-    ('a reopen keeps the end notification of the replaced item',
-     'const bool reopen = m_started.exchange(false);', 'const bool reopen = m_started;'),
-    ('a failed reopen does not report the stop of the replaced item',
-     'if (reopen && !m_started)\n', 'if (reopen && false)\n'),
+    ('a command that was not sent is never freed',
+     '    command.m_answered = true;\n', '    (void)command;\n'),
+    ('the open does not set the state of the renderer',
+     '    m_delegate->SetTransportInfo(info->m_trainfo);\n\n    const NPT_String& transportState',
+     '\n    const NPT_String& transportState'),
+    ('the close stops the renderer in each frame',
+     'if (m_stopremote.exchange(false))', 'if (m_stopremote)'),
+    ('the close completes before the answer of Stop',
+     '    if (!m_stop->m_answered && !m_stopTimeout.IsTimePast())\n      return false;\n', ''),
+    ('the close has no deadline',
+     'if (!m_stop->m_answered && !m_stopTimeout.IsTimePast())', 'if (!m_stop->m_answered)'),
+    ('the close does not end the item',
+     'if (m_started.exchange(false))\n    m_callback.OnPlayBackStopped();',
+     'if (m_started)\n    m_callback.OnPlayBackStopped();'),
     ('the worker reports the end twice',
-     'ended = m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false);',
-     'ended = m_delegate->GetTransportState() == "STOPPED" && m_started;'),
-    ('the worker reads the state outside the state lock',
-     '        std::unique_lock<CCriticalSection> lock(m_stateSection);\n        ended =', '        ended ='),
-
+     'if (m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false))',
+     'if (m_delegate->GetTransportState() == "STOPPED" && m_started)'),
+    ('the destructor does not stop the worker',
+     '  CloseFile();\n  // the close can wait for the renderer: the worker uses the members\n  StopThread(true);',
+     '  CloseFile();'),
 ]
 
 
@@ -1003,20 +953,15 @@ def production():
     command = source.index('class CUPnPCommand : public PLT_MediaControllerDelegate')
     command = source[command:source.index('\n};\n', command) + 4]
     command += function(source, 'static std::shared_ptr<CUPnPCommand> NewCommand()')
-    signatures = ['uint64_t CUPnPPlayer::AdvanceOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
-                  'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()',
-                  'void CUPnPPlayer::PublishTransportInfo(', 'void CUPnPPlayer::PollTransportInfo(']
+    command += function(source, 'static NPT_Result Sent(')
+    signatures = ['void CUPnPPlayer::CancelOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
+                  'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()']
     body = '\n'.join(function(source, signature) for signature in signatures)
     # The worker: one pass of the Process loop.
     process = function(source, 'void CUPnPPlayer::Process()')
-    poll = '    PollTransportInfo(m_delegate->UpdatePositionInfo());\n'
+    poll = '    m_delegate->UpdatePositionInfo();\n'
     assert poll in process
     worker = poll + function(process, '    if (m_started)')
-    # the thread case enters the worker after the started check
-    entered = '    if (m_started)\n    {\n'
-    assert worker.count(entered) == 1
-    worker = worker.replace(entered, entered + '      if (g_workerEntered)\n        g_workerEntered();\n')
-    body = 'std::function<void()> g_workerEntered;\n' + body
     body += '\nvoid CUPnPPlayer::WorkerStep()\n{\n' + worker + '\n}\n'
     code = PRELUDE.replace('@PRODUCTION@', 'namespace UPNP {\n' + command + body + '\n}  // namespace UPNP')
     return code, header
@@ -1053,10 +998,8 @@ def main():
     print('UPnP open/close: PASS (production methods; ASan/UBSan; recording renderer)')
 
 
-CASES = ['normal_open_close', 'close_twice', 'reopen', 'close_inside_wait',
-         'close_inside_wait_renderer_playing', 'newer_player_on_same_renderer',
-         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command', 'close_unanswered_wait', 'worker_end_during_reopen',
-         'close_during_last_command', 'attach']
+CASES = re.findall(r'X\((\w+)\)', PRELUDE[PRELUDE.index('#define CASES(X)'):
+                                             PRELUDE.index('int main(')])
 
 
 def run(code, expect_failure=False, label=''):
