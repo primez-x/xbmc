@@ -44,6 +44,7 @@ struct GUI {WindowManager wm;WindowManager& GetWindowManager(){return wm;}};
 struct CWinSystemAmlogicGLESContext {
   bool m_shutdownRequested=false,nativeGuiWait=true;
   void SetNativeGuiWait(bool enabled){assert(!enabled);nativeGuiWait=enabled;}
+  void GuiABFinish(const char*){}
   int retireCalls=0;
   CAMLDisplayLifecycle m_displayLifecycle;
   std::unique_ptr<CAMLDisplayLifecycle::Mutation> m_shutdownAdmission;
@@ -177,7 +178,8 @@ def build_source():
     methods = '\n'.join(function(player, signature) for signature in [
         'std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
         'bool CApplicationPlayer::ClosePlayer(', 'void CApplicationPlayer::ResetPlayer(',
-        'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'void CApplicationPlayer::OnPlaybackStopped()'])
+        'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'void CApplicationPlayer::OnPlaybackStopped()',
+        'void CApplicationPlayer::Supersede('])
     window = (ROOT / 'xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp').read_text()
     entry = (ROOT / 'xbmc/platform/xbmc.cpp').read_text()
     harness = HARNESS.replace('@PREPARE@', function(window, 'bool CWinSystemAmlogicGLESContext::PrepareForShutdown()'))
