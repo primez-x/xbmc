@@ -76,6 +76,8 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
 
   std::string savestatePath;
 
+  m_ended = false;
+
   // When playing a game, set the game client that we'll use to open the game.
   // This will prompt the user to select a savestate if there are any.
   // If there are no savestates, or the user wants to create a new savestate
@@ -84,6 +86,11 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
   {
     CLog::Log(LOGINFO,
               "RetroPlayer[PLAYER]: No compatible game client selected, aborting playback");
+    return false;
+  }
+  if (m_ended)
+  {
+    CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the game client selection");
     return false;
   }
 
@@ -176,7 +183,8 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
           bool dummy;
           if (!CGUIDialogYesNo::ShowAndGetInput(
                   438, StringUtils::Format(g_localizeStrings.Get(35217), addon->Name()), dummy, 222,
-                  35218, 0))
+                  35218, 0) ||
+              m_ended)
             bSuccess = false;
         }
       }
@@ -264,7 +272,8 @@ bool CRetroPlayer::CloseFile(bool reopen /* = false */)
   }
   m_processInfo.reset();
   CLog::Log(LOGDEBUG, "RetroPlayer[PLAYER]: Playback ended");
-  m_callback.OnPlayBackEnded();
+  if (!m_ended.exchange(true))
+    m_callback.OnPlayBackEnded();
 
   return true;
 }

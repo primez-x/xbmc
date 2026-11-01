@@ -16,6 +16,7 @@
 #include "guilib/DispResource.h"
 #include "threads/CriticalSection.h"
 
+#include <atomic>
 #include <memory>
 
 namespace KODI
@@ -140,6 +141,9 @@ private:
 
   // Synchronization parameters
   CCriticalSection m_mutex;
+  // The close reports the end of an item once. A close during the dialogs of
+  // the open (a newer item retires the player) cancels the open.
+  std::atomic<bool> m_ended{true};
 };
 } // namespace RETRO
 } // namespace KODI
