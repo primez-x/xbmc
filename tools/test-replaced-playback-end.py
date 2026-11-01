@@ -297,6 +297,22 @@ int main(){
   old->canClose=true;app.Frame();app.PlaybackCleanup();
   assert(CServiceBroker::gui.wm.active==HOME&&!app.player.HasPlayer()&&app.player.created==0);
  }
+ // The close of a stopped player can process messages (the wake dialog of a
+ // network share during the save of a game), and a request during the close is
+ // newer than the stop: the newer item and the playlist of the item stay, through
+ // both stop routes (Astra's round 39 probe).
+ for(bool deferred:{false,true}){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  old->m_type="game";auto& playlist=CServiceBroker::playlist;uint64_t newer=0;
+  old->onClose=[&]{playlist.SetCurrentPlaylist(TYPE_VIDEO);playlist.m_iCurrentSong=0;
+   CFileItem item;item.id=77;assert(app.PlayFile(item,"old",false,true));
+   newer=app.player.m_nextItem.intent;old->canClose=true;};
+  playlist.m_bIsDeferredPlayPending=deferred;
+  if(deferred)playlist.StopMessage(TYPE_NONE);else app.StopPlaying();
+  playlist.m_bIsDeferredPlayPending=false;
+  assert(newer&&!app.player.OpenSuperseded(newer)&&playlist.GetCurrentPlaylist()==TYPE_VIDEO);
+  app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.HasPlayer()&&app.player.m_pPlayer!=old&&app.player.m_pPlayer->lastItem==77);
+ }
  // An open that does not reach the player, for example a cancelled Blu-ray
  // title selection, does not supersede the end of the playback that continues.
  {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;old->playing=true;

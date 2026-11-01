@@ -3181,22 +3181,30 @@ void CApplication::StopPlaying(std::shared_ptr<CEvent> completion)
     const auto appPlayer = GetComponent<CApplicationPlayer>();
     if (appPlayer->HasPlayer() || appPlayer->HasPendingOpen() || appPlayer->IsOpening())
     {
-      appPlayer->ClosePlayer(false, std::move(completion));
+      // The stop cancels the opens that started before the stop. The close can
+      // process messages (the wake dialog of a network share during the save of
+      // a game): an open that reaches the player during the close is newer than
+      // the stop and keeps the playlist, the window and the party mode.
       appPlayer->CancelOpens();
-      // Without an end or stop notification to come, for example after the stop
-      // of a queued playlist item, no notification ends the playlist. A playlist
-      // item that the stop cancels does not continue the playlist.
-      if (!appPlayer->StopRequested() || appPlayer->IsOpening())
-        CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
+      const auto generation = appPlayer->GetOpenGeneration();
+      appPlayer->ClosePlayer(false, std::move(completion));
+      if (appPlayer->GetOpenGeneration() == generation)
+      {
+        // Without an end or stop notification to come, for example after the stop
+        // of a queued playlist item, no notification ends the playlist. A playlist
+        // item that the stop cancels does not continue the playlist.
+        if (!appPlayer->StopRequested() || appPlayer->IsOpening())
+          CServiceBroker::GetPlaylistPlayer().ResetCurrentPlaylist();
 
-      // turn off visualisation window when stopping
-      if ((iWin == WINDOW_VISUALISATION ||
-           iWin == WINDOW_FULLSCREEN_VIDEO ||
-           iWin == WINDOW_FULLSCREEN_GAME) &&
-           !m_bStop)
-        PlaybackCleanup();
+        // turn off visualisation window when stopping
+        if ((iWin == WINDOW_VISUALISATION ||
+             iWin == WINDOW_FULLSCREEN_VIDEO ||
+             iWin == WINDOW_FULLSCREEN_GAME) &&
+             !m_bStop)
+          PlaybackCleanup();
 
-      g_partyModeManager.Disable();
+        g_partyModeManager.Disable();
+      }
       appPlayer->CompleteCloseCompletions();
     }
   }

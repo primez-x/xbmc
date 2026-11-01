@@ -1175,9 +1175,12 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
       auto completion = pMsg->DeferCompletion();
       if (m_bIsDeferredPlayPending)
       {
+        // An open that reaches the player during the close is newer than the
+        // stop and keeps the playlist (StopPlaying).
+        const auto generation = appPlayer->GetOpenGeneration();
         appPlayer->ClosePlayer(false, std::move(completion));
         // Without an end or stop notification to come, the stop ends the playlist.
-        if (!appPlayer->StopRequested())
+        if (appPlayer->GetOpenGeneration() == generation && !appPlayer->StopRequested())
           ResetCurrentPlaylist();
       }
       else
