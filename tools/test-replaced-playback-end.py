@@ -964,6 +964,7 @@ def stack_adopt_program(function):
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 using CCriticalSection=std::recursive_mutex;
@@ -978,7 +979,7 @@ struct CFileItemList {
 struct CApplicationStackHelper {
  CCriticalSection m_critSection;std::map<int,int> m_stackmap;
  std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
- int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;
+ int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;std::string m_currentStackPath;
  void Adopt(CApplicationStackHelper&&);bool IsPlayingRegularStack() const;
 };
 """ + size + function(stack, 'void CApplicationStackHelper::Adopt(') + \
@@ -1005,6 +1006,11 @@ int main(){
 # the close callbacks), a job (the save of the file state) and the main thread
 # (the adoption and the initialization of a stack, the fullscreen condition).
 REGISTRATION_ACCESSORS = (
+    'void CApplicationStackHelper::Clear()',
+    'bool CApplicationStackHelper::InitializeStack(',
+    'CApplicationStackHelper::RegistrationKey CApplicationStackHelper::GetRegistrationKey(',
+    'CFileItem& CApplicationStackHelper::GetStackPartFileItem(int partNumber)\n{',
+    'const CFileItem& CApplicationStackHelper::GetStackPartFileItem(int partNumber) const',
     'void CApplicationStackHelper::ClearAllRegisteredStackInformation()',
     'void CApplicationStackHelper::SetRegisteredStack(',
     'int CApplicationStackHelper::GetRegisteredStackPartNumber(',
@@ -1013,7 +1019,7 @@ REGISTRATION_ACCESSORS = (
     'void CApplicationStackHelper::SetRegisteredStackPartStartTimeMs(',
     'uint64_t CApplicationStackHelper::GetRegisteredStackTotalTimeMs(',
     'void CApplicationStackHelper::SetRegisteredStackTotalTimeMs(',
-    'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const std::string& key)\n{')
+    'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const RegistrationKey& key)\n{')
 
 
 # A start callback of a player reads and removes registrations while the main
@@ -1027,7 +1033,7 @@ def stack_race_program(function):
 int main(){
  (void)Fullscreen;  // the main thread program checks the condition
  CApplicationStackHelper current;current.Stage({"a1.mkv","a2.mkv"},1);
- const CFileItem a1{"a1.mkv"},a2{"a2.mkv"},older{"older.mkv"};
+ const CFileItem a1=current.GetStackPartFileItem(0),a2=current.GetStackPartFileItem(1),older{"older.mkv"};
  // The threads take turns through a relaxed counter, which orders nothing for
  // ThreadSanitizer: only the lock of the registrations orders the accesses, and a
  // read follows each write.
@@ -1100,13 +1106,26 @@ struct CApplicationPlayerCallback {void OnPlayerCloseFile(const CFileItem&,const
 int main(){
  (void)Fullscreen;  // the main thread program checks the condition
  auto& stack=*CServiceBroker::GetAppComponents().stack;stack.Stage({"a1.mkv","a2.mkv"},1);
- const CFileItem a2{"a2.mkv"};
+ const CFileItem a2=stack.GetStackPartFileItem(1);
  stack.SetRegisteredStackTotalTimeMs(a2,3600000);stack.SetRegisteredStackPartStartTimeMs(a2,1800000);
- stack.SetRegisteredStackPartNumber(a2,1);
  CBookmark bookmark;bookmark.timeInSeconds=600;bookmark.totalTimeInSeconds=1800;
  CApplicationPlayerCallback().OnPlayerCloseFile(a2,bookmark);
  // the bookmark of a part is a bookmark of the stack
- assert(saves==1&&savedPath=="stack://a1.mkv"&&saved.timeInSeconds==2400&&saved.totalTimeInSeconds==3600&&saved.partNumber==1);
+ assert(saves==1&&savedPath=="stack://a1.mkv , a2.mkv"&&saved.timeInSeconds==2400&&saved.totalTimeInSeconds==3600&&saved.partNumber==1);
+ // Stack A plays the part that stack B shares, and the user opens B: the late
+ // close of the part of A saves the bookmark of A, not of B.
+ stack.Stage({"shared.mkv","a2.mkv"},0);
+ const CFileItem sharedA=stack.GetStackPartFileItem(0);
+ stack.SetRegisteredStackTotalTimeMs(sharedA,3600000);
+ CApplicationStackHelper staged;staged.Stage({"b1.mkv","shared.mkv"},1);
+ const CFileItem sharedB=staged.GetStackPartFileItem(1);
+ staged.SetRegisteredStackTotalTimeMs(sharedB,4000000);staged.SetRegisteredStackPartStartTimeMs(sharedB,3600000);
+ stack.Adopt(std::move(staged));
+ CApplicationPlayerCallback().OnPlayerCloseFile(sharedA,bookmark);
+ assert(saves==2&&savedPath=="stack://shared.mkv , a2.mkv"&&saved.timeInSeconds==600&&saved.totalTimeInSeconds==3600&&saved.partNumber==0);
+ // a single video of the same file saves the bookmark of the file
+ CApplicationPlayerCallback().OnPlayerCloseFile(CFileItem{"shared.mkv"},bookmark);
+ assert(saves==3&&savedPath=="shared.mkv"&&saved.timeInSeconds==600&&saved.totalTimeInSeconds==1800);
 }
 """
 
@@ -1125,6 +1144,8 @@ def stack_registration_program(function):
 #include <string>
 #include <utility>
 #include <vector>
+struct CURL {std::string path;};
+struct CVariant {std::string value;const std::string& asString() const {return value;}};
 // The lock counts the locks of the thread, and the map of the registrations
 // fails every access of a thread without the lock.
 static thread_local int t_locks=0;
@@ -1147,24 +1168,40 @@ template<class K,class V> struct CheckedMap {
  void clear(){Check();map.clear();} bool empty() const {Check();return map.empty();}
 };
 struct CFileItem {
- std::string path;int offset=0;
- const std::string& GetPath() const {return path;} int GetStartOffset() const {return offset;}
+ std::string path;int offset=0;std::map<std::string,std::string> properties;
+ CFileItem(std::string itemPath={},int startOffset=0):path(std::move(itemPath)),offset(startOffset){}
+ const std::string& GetPath() const {return path;} const std::string& GetDynPath() const {return path;}
+ int GetStartOffset() const {return offset;}
+ bool IsStack() const {return path.rfind("stack://",0)==0;} CURL GetURL() const {return {path};}
+ CVariant GetProperty(const std::string& key) const
+ {const auto it=properties.find(key);return {it==properties.end()?std::string():it->second};}
+ void SetProperty(const std::string& key,const std::string& value){properties[key]=value;}
 };
 struct CFileItemList {
- std::vector<CFileItem> items;
+ std::vector<std::shared_ptr<CFileItem>> items;
  void Assign(const CFileItemList& list){items=list.items;} void Clear(){items.clear();}
- int Size() const {return static_cast<int>(items.size());}
- bool Contains(const std::string& path) const
- {return std::any_of(items.begin(),items.end(),[&](const CFileItem& item){return item.path==path;});}
+ int Size() const {return static_cast<int>(items.size());} bool IsEmpty() const {return items.empty();}
+ std::shared_ptr<CFileItem> operator[](int i) const {return items[i];}
 };
+// The parts of "stack://a.mkv , b.mkv"
+struct CStackDirectory {bool GetDirectory(const CURL& url,CFileItemList& list){
+ std::string rest=url.path.substr(8);
+ for(size_t end;(end=rest.find(" , "))!=std::string::npos;rest=rest.substr(end+3))
+  list.items.push_back(std::make_shared<CFileItem>(CFileItem{rest.substr(0,end)}));
+ list.items.push_back(std::make_shared<CFileItem>(CFileItem{rest}));return true;}};
+struct URIUtils {static bool IsDiscImageStack(const std::string&){return false;}};
 struct CApplicationStackHelper {
  struct StackPartInformation {uint64_t m_lStackPartStartTimeMs=0;uint64_t m_lStackTotalTimeMs=0;
   int m_lStackPartNumber=0;std::shared_ptr<CFileItem> m_pStack;};
  using StackPartInformationPtr=std::shared_ptr<StackPartInformation>;
- using Stackmap=CheckedMap<std::string,StackPartInformationPtr>;
+ using RegistrationKey=std::pair<std::string,std::string>;
+ using Stackmap=CheckedMap<RegistrationKey,StackPartInformationPtr>;
  mutable CCriticalSection m_critSection;Stackmap m_stackmap;
  std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
- int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;
+ int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;std::string m_currentStackPath;
+ static RegistrationKey GetRegistrationKey(const CFileItem&);
+ bool InitializeStack(const CFileItem&);void Clear();
+ CFileItem& GetStackPartFileItem(int);const CFileItem& GetStackPartFileItem(int) const;
  void Adopt(CApplicationStackHelper&&);void OnPlayBackStarted(const CFileItem&);
  bool HasRegisteredStack(const CFileItem&) const;
  std::shared_ptr<const CFileItem> GetRegisteredStack(const CFileItem&) const;
@@ -1173,17 +1210,13 @@ struct CApplicationStackHelper {
  int GetRegisteredStackPartNumber(const CFileItem&);void SetRegisteredStackPartNumber(const CFileItem&,int);
  uint64_t GetRegisteredStackPartStartTimeMs(const CFileItem&) const;void SetRegisteredStackPartStartTimeMs(const CFileItem&,uint64_t);
  uint64_t GetRegisteredStackTotalTimeMs(const CFileItem&) const;void SetRegisteredStackTotalTimeMs(const CFileItem&,uint64_t);
- StackPartInformationPtr GetStackPartInformation(const std::string&);
- StackPartInformationPtr GetStackPartInformation(const std::string&) const;
+ StackPartInformationPtr GetStackPartInformation(const RegistrationKey&);
+ StackPartInformationPtr GetStackPartInformation(const RegistrationKey&) const;
  bool IsPlayingRegularStack() const;int GetCurrentPartNumber() const {return m_currentStackPosition;}
- void Clear(){m_currentStackPosition=0;m_currentStack->Clear();}
- // a stack with the parts of the paths, resumed at a part
+ // a stack with the parts of the paths, resumed at a part (CApplication::PlayStack)
  void Stage(const std::vector<std::string>& paths,int position)
- {std::unique_lock<CCriticalSection> lock(m_critSection);
-  auto item=std::make_shared<CFileItem>(CFileItem{"stack://"+paths[0]});
-  for(const auto& path:paths){m_currentStack->items.push_back({path});
-   m_stackmap[path]=std::make_shared<StackPartInformation>();m_stackmap[path]->m_pStack=item;}
-  m_currentStackPosition=position;}
+ {std::string url="stack://";for(size_t i=0;i<paths.size();++i)url+=(i?" , ":"")+paths[i];
+  const bool initialized=InitializeStack(CFileItem{url});assert(initialized);m_currentStackPosition=position;}
 };
 // The fullscreen condition of a stack part (CApplication::PlayFile)
 static bool Fullscreen(const CApplicationStackHelper* stack,const CFileItem& item)
@@ -1191,18 +1224,20 @@ static bool Fullscreen(const CApplicationStackHelper* stack,const CFileItem& ite
 """ + condition + r"""
       fullscreen=true;
  return fullscreen;}
-""" + ''.join(function(stack, signature) for signature in (
+""" + stack[stack.index('namespace\n{'):stack.index('} // namespace\n') + 16] + ''.join(function(stack, signature) for signature in (
         'void CApplicationStackHelper::Adopt(', 'void CApplicationStackHelper::OnPlayBackStarted(',
         'bool CApplicationStackHelper::HasRegisteredStack(',
         'std::shared_ptr<const CFileItem> CApplicationStackHelper::GetRegisteredStack(',
-        'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const std::string& key) const',
+        'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const RegistrationKey& key) const',
         'bool CApplicationStackHelper::IsPlayingRegularStack() const') + REGISTRATION_ACCESSORS) + r"""
 int main(){
- CFileItem older{"older.mkv"},a2{"a2.mkv"},b1{"b1.mkv"},b2{"b2.mkv"};
+ const CFileItem older{"older.mkv"};
  for(int startedItem=0;startedItem<2;++startedItem){
   // stack A plays; the user opens stack B, resumed at part 2
   CApplicationStackHelper current,staged;current.Stage({"a1.mkv","a2.mkv"},1);
   staged.Stage({"b1.mkv","b2.mkv"},1);
+  // the part items that the players open
+  const CFileItem a2=current.GetStackPartFileItem(1),b1=staged.GetStackPartFileItem(0),b2=staged.GetStackPartFileItem(1);
   const auto stackB=staged.GetRegisteredStack(b2);
   current.Adopt(std::move(staged));
   // the start of an older item (a single video, or a part of stack A) arrives after the adoption
@@ -1218,6 +1253,24 @@ int main(){
   current.Clear();current.OnPlayBackStarted(older);
   std::unique_lock<CCriticalSection> lock(current.m_critSection);
   assert(current.m_stackmap.empty());
+ }
+ // Stack A and stack B share a part. A plays the shared part, and the user opens
+ // B before the end of A: every playback keeps the registration of the playback.
+ {CApplicationStackHelper current,staged;current.Stage({"shared.mkv","a2.mkv"},0);
+  staged.Stage({"b1.mkv","shared.mkv"},1);
+  const CFileItem sharedA=current.GetStackPartFileItem(0),sharedB=staged.GetStackPartFileItem(1);
+  const auto stackA=current.GetRegisteredStack(sharedA),stackB=staged.GetRegisteredStack(sharedB);
+  assert(stackA&&stackB&&stackA!=stackB);
+  current.Adopt(std::move(staged));
+  // the late start and the close of the part of A find A; the part of B finds B
+  current.OnPlayBackStarted(sharedA);
+  assert(current.GetRegisteredStack(sharedA)==stackA&&current.GetRegisteredStack(sharedB)==stackB);
+  assert(current.GetRegisteredStackPartNumber(sharedA)==0&&current.GetRegisteredStackPartNumber(sharedB)==1);
+  // a single video of the same file belongs to no stack
+  assert(!current.HasRegisteredStack(CFileItem{"shared.mkv"})&&!current.GetRegisteredStack(CFileItem{"shared.mkv"}));
+  // the start of the part of B removes A and keeps B
+  current.OnPlayBackStarted(sharedB);
+  assert(!current.HasRegisteredStack(sharedA)&&current.GetRegisteredStack(sharedB)==stackB);
  }
 }
 """

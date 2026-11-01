@@ -208,12 +208,18 @@ protected:
   };
 
   typedef std::shared_ptr<StackPartInformation> StackPartInformationPtr;
-  typedef std::map<std::string, StackPartInformationPtr> Stackmap;
+  // A registration belongs to a part of one stack (the path of the part, the path
+  // of the stack): another stack or a single video with the same file has a
+  // separate registration.
+  using RegistrationKey = std::pair<std::string, std::string>;
+  typedef std::map<RegistrationKey, StackPartInformationPtr> Stackmap;
   Stackmap m_stackmap;
-  StackPartInformationPtr GetStackPartInformation(const std::string& key);
-  StackPartInformationPtr GetStackPartInformation(const std::string& key) const;
+  static RegistrationKey GetRegistrationKey(const CFileItem& item);
+  StackPartInformationPtr GetStackPartInformation(const RegistrationKey& key);
+  StackPartInformationPtr GetStackPartInformation(const RegistrationKey& key) const;
 
   std::unique_ptr<CFileItemList> m_currentStack;
   int m_currentStackPosition = 0;
   bool m_currentStackIsDiscImageStack = false;
+  std::string m_currentStackPath; // the stack of the registrations of the current stack
 };
