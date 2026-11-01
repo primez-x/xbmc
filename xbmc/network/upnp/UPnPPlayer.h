@@ -10,6 +10,7 @@
 #pragma once
 
 #include "cores/IPlayer.h"
+#include "threads/CriticalSection.h"
 #include "threads/SystemClock.h"
 #include "threads/Thread.h"
 #include "utils/logtypes.h"
@@ -24,6 +25,7 @@ class PLT_MediaController;
 namespace UPNP
 {
 
+class CUPnPCommand;
 class CUPnPPlayerController;
 
 class CUPnPPlayer : public IPlayer, public CThread
@@ -60,6 +62,10 @@ public:
 private:
   bool IsPaused() const;
   int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  // An open publishes the transport state of the renderer and starts a new epoch
+  void PublishTransportInfo(const CUPnPCommand& info);
+  // The worker polls the transport state when send is true
+  void PollTransportInfo(bool send);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -72,10 +78,14 @@ private:
   std::unique_ptr<CUPnPPlayerController> m_delegate;
   std::string m_current_uri;
   std::string m_current_meta;
-  bool m_started = false;
+  std::atomic<bool> m_started{false};
   std::atomic<bool> m_stopremote{false};
   // The current open; a newer open and a close advance the sequence
   std::atomic<uint64_t> m_openSequence{0};
+  CCriticalSection m_pollSection;
+  std::shared_ptr<CUPnPCommand> m_poll;
+  uint64_t m_pollEpoch{0};
+  uint64_t m_stateEpoch{0};
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;

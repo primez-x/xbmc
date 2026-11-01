@@ -21,13 +21,17 @@ ROOT = Path(__file__).resolve().parents[1]
 function = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['function']
 
 PRELUDE = r'''
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 using namespace std::chrono_literals;
 
@@ -93,6 +97,7 @@ struct CMusicThumbLoader : CThumbLoader {};
 const int UPnPPlayer = 1;
 struct CUPnP {
   static void* GetServer() { return nullptr; }
+  static void RegisterUserdata(void*);
   static void UnregisterUserdata(void*);
 };
 template<class F, class... A> NPT_Reference<PLT_MediaObject> BuildObject(F& file, A&&...) {
@@ -114,21 +119,33 @@ struct CFileItem {
 };
 struct CPlayerOptions { double starttime = 0; };
 struct IPlayerCallback {
-  int started = 0, avstarted = 0, stopped = 0;
+  int started = 0, avstarted = 0, stopped = 0, ended = 0;
   void OnPlayBackStarted(const CFileItem&) { ++started; }
   void OnAVStarted(const CFileItem&) { ++avstarted; }
   void OnPlayBackStopped() { ++stopped; }
-  int Total() const { return started + avstarted + stopped; }
+  void OnPlayBackEnded() { ++ended; }
+  void OnPlayBackPaused() {}
+  void OnPlayBackResumed() {}
+  int Total() const { return started + avstarted + stopped + ended; }
 };
 struct LoggerImpl {
   template<class... A> void error(const char*, A&&...) {}
   template<class... A> void debug(const char*, A&&...) {}
+  template<class... A> void info(const char*, A&&...) {}
 };
 using Logger = std::shared_ptr<LoggerImpl>;
-struct CDataCacheCoreStub { void Reset() {} };
-struct CServiceBroker { static CDataCacheCoreStub& GetDataCacheCore() { static CDataCacheCoreStub c; return c; } };
+struct CDataCacheCore {
+  float speed = 1.0f;
+  static CDataCacheCore& GetInstance() { static CDataCacheCore c; return c; }
+  void Reset() {}
+  void SetPlayTimes(int64_t, int64_t, int64_t, int64_t) {}
+  float GetSpeed() const { return speed; }
+  void SetSpeed(float, float s) { speed = s; }
+};
+struct CServiceBroker { static CDataCacheCore& GetDataCacheCore() { return CDataCacheCore::GetInstance(); } };
 
 void DeliverPending();
+struct CCriticalSection { void lock() {} void unlock() {} };
 struct CEvent {
   bool signaled = false;
   void Set() { signaled = true; }
@@ -169,110 +186,151 @@ struct CGUIDialogBusy {
 
 namespace UPNP {
 class CUPnPPlayerController;
-struct PLT_MediaControllerDelegate { virtual ~PLT_MediaControllerDelegate() = default; };
-struct PLT_DeviceDataReference { void* AsPointer() { return nullptr; } };
+struct PLT_DeviceDataReference {
+  CUPnPPlayerController* owner = nullptr;
+  void* AsPointer() { return nullptr; }
+};
+// The Platinum delegate: the controller answers a command to the userdata of the
+// command.
+struct PLT_MediaControllerDelegate {
+  virtual ~PLT_MediaControllerDelegate() = default;
+  virtual void OnSetAVTransportURIResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnSetNextAVTransportURIResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnPlayResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnStopResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnGetTransportInfoResult(NPT_Result, PLT_DeviceDataReference&, PLT_TransportInfo*,
+                                        void*) {}
+};
 EMediaControllerQuirks GetMediaControllerQuirks(void*) { return EMEDIACONTROLLERQUIRKS_NONE; }
 
 struct PLT_MediaController {
   std::vector<std::string> log;
-  struct Pending { CUPnPPlayerController* owner; std::function<void(CUPnPPlayerController&)> answer; };
+  struct Pending {
+    void* userdata;
+    int delay;
+    std::function<void(PLT_MediaControllerDelegate&)> answer;
+  };
   std::vector<Pending> pending;
   std::function<void(const std::string&)> cmdHook;
-  NPT_Result Send(PLT_MediaControllerDelegate* d, const char* cmd,
-                  std::function<void(CUPnPPlayerController&)> answer);
+  NPT_Result Send(PLT_DeviceDataReference& device, void* userdata, const char* cmd,
+                  std::function<void(PLT_MediaControllerDelegate&)> answer, int delay = 0);
   NPT_Result FindBestResource(PLT_DeviceDataReference&, PLT_MediaObject&, NPT_Cardinal& i) {
     i = 0;
     return NPT_SUCCESS;
   }
-  NPT_Result GetTransportInfo(PLT_DeviceDataReference&, NPT_UInt32, PLT_MediaControllerDelegate* d);
-  NPT_Result Stop(PLT_DeviceDataReference&, NPT_UInt32, PLT_MediaControllerDelegate* d);
+  NPT_Result GetTransportInfo(PLT_DeviceDataReference&, NPT_UInt32, void* userdata);
+  NPT_Result Stop(PLT_DeviceDataReference&, NPT_UInt32, void* userdata);
   NPT_Result SetAVTransportURI(PLT_DeviceDataReference&, NPT_UInt32, const NPT_String&,
-                               const NPT_String&, PLT_MediaControllerDelegate* d);
-  NPT_Result Play(PLT_DeviceDataReference&, NPT_UInt32, const char*, PLT_MediaControllerDelegate* d);
-  NPT_Result Seek(PLT_DeviceDataReference&, NPT_UInt32, const char*, const NPT_String&,
-                  PLT_MediaControllerDelegate* d) { return Send(d, "Seek", nullptr); }
-  NPT_Result GetPositionInfo(PLT_DeviceDataReference&, NPT_UInt32, PLT_MediaControllerDelegate* d) {
-    return Send(d, "GetPositionInfo", nullptr);
+                               const NPT_String&, void* userdata);
+  NPT_Result SetNextAVTransportURI(PLT_DeviceDataReference& d, NPT_UInt32, const char*, const char*,
+                                   void* userdata) {
+    return Send(d, userdata, "SetNextAVTransportURI", nullptr);
   }
-  NPT_Result GetMediaInfo(PLT_DeviceDataReference&, NPT_UInt32, PLT_MediaControllerDelegate* d) {
-    return Send(d, "GetMediaInfo", nullptr);
+  NPT_Result Play(PLT_DeviceDataReference&, NPT_UInt32, const char*, void* userdata);
+  NPT_Result Seek(PLT_DeviceDataReference& d, NPT_UInt32, const char*, const NPT_String&,
+                  void* userdata) { return Send(d, userdata, "Seek", nullptr); }
+  NPT_Result GetPositionInfo(PLT_DeviceDataReference& d, NPT_UInt32, void* userdata) {
+    return Send(d, userdata, "GetPositionInfo", nullptr);
+  }
+  NPT_Result GetMediaInfo(PLT_DeviceDataReference& d, NPT_UInt32, void* userdata) {
+    return Send(d, userdata, "GetMediaInfo", nullptr);
   }
 };
 
+// The renderer of one player. The first GetTransportInfo after a stop reports
+// firstState, later ones PLAYING.
 class CUPnPPlayerController : public PLT_MediaControllerDelegate {
 public:
-  CUPnPPlayerController(PLT_MediaController* c, const char* n) : m_control(c), name(n) {}
+  CUPnPPlayerController(PLT_MediaController* c, const char* n) : m_control(c), name(n) {
+    m_device.owner = this;
+  }
   NPT_String GetTransportState() const { return m_trainfo.cur_transport_state; }
   NPT_String GetTransportStatus() const { return m_trainfo.cur_transport_status; }
+  void SetTransportInfo(const PLT_TransportInfo& info) { m_trainfo = info; }
+  bool pollDue = false;  // the position poll finds the transport poll due
+  bool UpdatePositionInfo() { return std::exchange(pollDue, false); }
   PLT_MediaController* m_control;
   PLT_DeviceDataReference m_device;
   NPT_UInt32 m_instance = 0;
-  NPT_Result m_resstatus = NPT_SUCCESS;
-  CEvent m_resevent, m_traevnt;
-  PLT_TransportInfo m_trainfo;
+  PLT_TransportInfo m_trainfo;  // the state that the worker polls
   std::string name;
-  // The first GetTransportInfo after a stop reports firstState, later ones PLAYING.
   std::string firstState = "STOPPED";
   int infoCalls = 0;
   int stopRejects = 0;  // the next Stop commands that the renderer rejects
+  int stopDelay = 0;    // the delivery rounds that the answer of the next Stop waits
+  int uriRejects = 0;   // the next SetAVTransportURI commands that the renderer rejects
+  int transitioning = 0;  // the later GetTransportInfo answers that report TRANSITIONING
   std::string uri;      // the URI of the last SetAVTransportURI
+  std::string nextState;  // the state of the next GetTransportInfo answer, once
 };
 
-NPT_Result PLT_MediaController::Send(PLT_MediaControllerDelegate* d, const char* cmd,
-                                     std::function<void(CUPnPPlayerController&)> answer) {
-  auto* c = static_cast<CUPnPPlayerController*>(d);
-  log.push_back(c->name + ":" + cmd);
+NPT_Result PLT_MediaController::Send(PLT_DeviceDataReference& device, void* userdata,
+                                     const char* cmd,
+                                     std::function<void(PLT_MediaControllerDelegate&)> answer,
+                                     int delay) {
+  log.push_back(device.owner->name + ":" + cmd);
   if (answer)
-    pending.push_back({c, answer});
+    pending.push_back({userdata, delay, answer});
   if (cmdHook) {
     auto hook = cmdHook;
     hook(log.back());
   }
   return NPT_SUCCESS;
 }
-NPT_Result PLT_MediaController::GetTransportInfo(PLT_DeviceDataReference&, NPT_UInt32,
-                                                 PLT_MediaControllerDelegate* d) {
-  auto* c = static_cast<CUPnPPlayerController*>(d);
-  const bool first = c->infoCalls++ == 0;
-  return Send(d, "GetTransportInfo", [first](CUPnPPlayerController& p) {
-    p.m_trainfo.cur_transport_state = first ? p.firstState.c_str() : "PLAYING";
-    p.m_trainfo.cur_transport_status = "OK";
-    p.m_traevnt.Set();
+NPT_Result PLT_MediaController::GetTransportInfo(PLT_DeviceDataReference& device, NPT_UInt32,
+                                                 void* userdata) {
+  auto* r = device.owner;
+  PLT_TransportInfo info;
+  info.cur_transport_state = !r->nextState.empty() ? std::exchange(r->nextState, "").c_str()
+                             : r->infoCalls++ == 0 ? r->firstState.c_str()
+                             : r->transitioning > 0 ? (--r->transitioning, "TRANSITIONING")
+                                                    : "PLAYING";
+  info.cur_transport_status = "OK";
+  return Send(device, userdata, "GetTransportInfo", [device, info](PLT_MediaControllerDelegate& d) {
+    auto dev = device;
+    auto i = info;
+    d.OnGetTransportInfoResult(NPT_SUCCESS, dev, &i, nullptr);
   });
 }
-NPT_Result PLT_MediaController::Stop(PLT_DeviceDataReference&, NPT_UInt32,
-                                     PLT_MediaControllerDelegate* d) {
-  return Send(d, "Stop", [](CUPnPPlayerController& p) {
-    if (p.stopRejects > 0) {
-      --p.stopRejects;
-      p.m_resstatus = NPT_FAILURE;
-      p.m_resevent.Set();
-      return;
-    }
-    p.infoCalls = 0;
-    p.m_resstatus = NPT_SUCCESS;
-    p.m_resevent.Set();
-  });
+NPT_Result PLT_MediaController::Stop(PLT_DeviceDataReference& device, NPT_UInt32, void* userdata) {
+  auto* r = device.owner;
+  // the renderer decides when the command arrives
+  const NPT_Result result = r->stopRejects > 0 ? (--r->stopRejects, NPT_FAILURE) : NPT_SUCCESS;
+  if (result == NPT_SUCCESS)
+    r->infoCalls = 0;
+  const int delay = std::exchange(r->stopDelay, 0);
+  return Send(device, userdata, "Stop", [device, result](PLT_MediaControllerDelegate& d) {
+    auto dev = device;
+    d.OnStopResult(result, dev, nullptr);
+  }, delay);
 }
-NPT_Result PLT_MediaController::SetAVTransportURI(PLT_DeviceDataReference&, NPT_UInt32,
+NPT_Result PLT_MediaController::SetAVTransportURI(PLT_DeviceDataReference& device, NPT_UInt32,
                                                   const NPT_String& uri, const NPT_String&,
-                                                  PLT_MediaControllerDelegate* d) {
-  static_cast<CUPnPPlayerController*>(d)->uri = uri;
-  return Send(d, "SetAVTransportURI", [](CUPnPPlayerController& p) {
-    p.m_resstatus = NPT_SUCCESS;
-    p.m_resevent.Set();
+                                                  void* userdata) {
+  auto* r = device.owner;
+  const NPT_Result result = r->uriRejects > 0 ? (--r->uriRejects, NPT_FAILURE) : NPT_SUCCESS;
+  if (result == NPT_SUCCESS)
+    r->uri = uri;
+  return Send(device, userdata, "SetAVTransportURI", [device, result](PLT_MediaControllerDelegate& d) {
+    auto dev = device;
+    d.OnSetAVTransportURIResult(result, dev, nullptr);
   });
 }
-NPT_Result PLT_MediaController::Play(PLT_DeviceDataReference&, NPT_UInt32, const char*,
-                                     PLT_MediaControllerDelegate* d) {
-  return Send(d, "Play", [](CUPnPPlayerController& p) {
-    p.m_resstatus = NPT_SUCCESS;
-    p.m_resevent.Set();
+NPT_Result PLT_MediaController::Play(PLT_DeviceDataReference& device, NPT_UInt32, const char*,
+                                     void* userdata) {
+  return Send(device, userdata, "Play", [device](PLT_MediaControllerDelegate& d) {
+    auto dev = device;
+    d.OnPlayResult(NPT_SUCCESS, dev, nullptr);
   });
 }
 
 PLT_MediaController g_ctl;
+std::vector<void*> g_userdata;  // the Platinum userdata registry
+bool Registered(void* userdata) {
+  return std::find(g_userdata.begin(), g_userdata.end(), userdata) != g_userdata.end();
+}
 
+class CUPnPCommand;
 class CUPnPPlayer {
 public:
   CUPnPPlayer(IPlayerCallback& cb, const char* name)
@@ -285,17 +343,28 @@ public:
   bool CloseFile(bool reopen = false);
   int PlayFile(const CFileItem& file, const CPlayerOptions& options, XbmcThreads::EndTime<>& timeout,
                uint64_t open);
-@WAITDECL@
+  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  void PublishTransportInfo(const CUPnPCommand& info);
+  void PollTransportInfo(bool send);
   bool IsRunning() const { return running; }
   void Create() { ++creates; running = true; }
   void StopThread(bool) { running = false; }
+  bool IsPaused() const { return false; }
+  int64_t GetTime() { return 0; }
+  int64_t GetTotalTime() { return 0; }
+  // One pass of the worker loop of CUPnPPlayer::Process.
+  void WorkerStep();
 
   PLT_MediaController* m_control;
   std::unique_ptr<CUPnPPlayerController> m_delegate;
   IPlayerCallback& m_callback;
-  bool m_started = false;
-  @STOPTYPE@ m_stopremote{false};
+  std::atomic<bool> m_started{false};
+  std::atomic<bool> m_stopremote{false};
   std::atomic<uint64_t> m_openSequence{0};
+  CCriticalSection m_pollSection;
+  std::shared_ptr<CUPnPCommand> m_poll;
+  uint64_t m_pollEpoch{0};
+  uint64_t m_stateEpoch{0};
   bool m_hasVideo{false};
   bool m_hasAudio{false};
   XbmcThreads::EndTime<> m_updateTimer;
@@ -305,17 +374,26 @@ public:
 };
 }  // namespace UPNP
 
-void CUPnP::UnregisterUserdata(void* delegate) {
-  // Platinum drops the answers of an unregistered delegate.
-  auto& p = UPNP::g_ctl.pending;
-  for (size_t i = 0; i < p.size();)
-    p[i].owner == delegate ? (void)p.erase(p.begin() + i) : (void)++i;
+void CUPnP::RegisterUserdata(void* userdata) { UPNP::g_userdata.push_back(userdata); }
+void CUPnP::UnregisterUserdata(void* userdata) {
+  auto& v = UPNP::g_userdata;
+  v.erase(std::remove(v.begin(), v.end(), userdata), v.end());
 }
+// One delivery round. Platinum drops the answer for a userdata that is not
+// registered.
 void DeliverPending() {
   auto v = std::move(UPNP::g_ctl.pending);
   UPNP::g_ctl.pending.clear();
-  for (auto& e : v)
-    e.answer(*e.owner);
+  for (auto& e : v) {
+    if (e.delay > 0) {
+      --e.delay;
+      UPNP::g_ctl.pending.push_back(e);
+      continue;
+    }
+    auto& r = UPNP::g_userdata;
+    if (std::find(r.begin(), r.end(), e.userdata) != r.end())
+      e.answer(*static_cast<UPNP::PLT_MediaControllerDelegate*>(e.userdata));
+  }
 }
 using namespace UPNP;
 
@@ -323,8 +401,7 @@ using namespace UPNP;
 
 // ---- scenarios ----
 const std::vector<std::string> NORMAL = {"GetTransportInfo", "SetAVTransportURI", "Play",
-                                         "GetTransportInfo", "GetTransportInfo",
-                                         "GetPositionInfo", "GetMediaInfo"};
+                                         "GetTransportInfo", "GetPositionInfo", "GetMediaInfo"};
 CFileItem Item(const char* path = "http://server/a.mkv") { return CFileItem(path); }
 void Begin(const std::string& name) {
   g_case = name;
@@ -404,9 +481,6 @@ void reopen() {
     CUPnPPlayer p(cb, "P");
     CHECK(p.OpenFile(Item(), CPlayerOptions()));
     CHECK(p.CloseFile(true));
-    // A late answer of the first session does not answer a command of the second.
-    p.m_delegate->m_traevnt.Set();
-    p.m_delegate->m_resevent.Set();
     CHECK(p.OpenFile(Item(), CPlayerOptions()));
     CHECK(cb.started == 2 && cb.avstarted == 2 && p.creates == 2);
   }
@@ -536,6 +610,25 @@ void rejected_stop() {
   }
   CHECK(Count("P:Stop") == 2);
 
+  // The answer of Play arrives during the wait of the close for the Stop, and the
+  // renderer rejects the Stop later: the answer of Play is not the answer of Stop.
+  Begin("late answer of Play during the stop of a close");
+  {
+    CUPnPPlayer p(cb, "P");
+    g_waitHook = [&](int w) {
+      if (w != 3)  // the wait for the answer to Play
+        return;
+      g_waitHook = nullptr;
+      p.m_delegate->stopRejects = 1;
+      p.m_delegate->stopDelay = 1;
+      CHECK(!p.CloseFile());
+    };
+    CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(p.CloseFile());
+    CHECK(p.CloseFile());
+  }
+  CHECK(Count("P:Stop") == 2);
+
   Begin("rejected stop during an open");
   {
     CUPnPPlayer p(cb, "P");
@@ -552,22 +645,135 @@ void rejected_stop() {
   CHECK(Count("P:Stop") == 2);
 }
 
+// The wait for PLAYING reads the answer of the command that the wait sent, not
+// the state that the worker polled.
+void transitioning_renderer() {
+  Begin("renderer reports TRANSITIONING before PLAYING");
+  IPlayerCallback cb;
+  CUPnPPlayer p(cb, "P");
+  p.m_delegate->transitioning = 1;
+  p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
+  p.m_delegate->m_trainfo.cur_transport_status = "ERROR_OCCURED";
+  CHECK(p.OpenFile(Item(), CPlayerOptions()));
+  CHECK(cb.started == 1);
+  ExpectLog(Of("P", {"GetTransportInfo", "SetAVTransportURI", "Play", "GetTransportInfo",
+                     "GetTransportInfo", "GetPositionInfo", "GetMediaInfo"}));
+}
+
+// An open of a playing player replaces the item: the stop of the renderer during
+// the open is not the end of the replaced item. A failed open reports the stop.
+void reopen_notifications() {
+  for (const bool fail : {false, true}) {
+    Begin(fail ? "failed reopen of a playing player" : "reopen of a playing player");
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
+    p.m_delegate->m_trainfo.cur_transport_state = "PLAYING";
+    p.m_delegate->firstState = "PLAYING";
+    p.m_delegate->infoCalls = 0;
+    p.m_delegate->uriRejects = fail ? 1 : 0;
+    g_waitHook = [&](int) {
+      // the worker polled the renderer that the open stopped
+      if (Count("P:Stop") == 1) {
+        p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
+        p.WorkerStep();
+      }
+    };
+    CHECK(p.OpenFile(Item("http://server/next.mkv"), CPlayerOptions()) == !fail);
+    g_waitHook = nullptr;
+    CHECK(cb.ended == 0);
+    // the open published the state of the renderer: the new item plays
+    if (!fail)
+      CHECK(p.m_delegate->GetTransportState() == "PLAYING");
+    else
+      p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
+    p.WorkerStep();
+    CHECK(cb.ended == 0);
+    CHECK(cb.started == (fail ? 1 : 2) && cb.stopped == (fail ? 1 : 0));
+    if (!fail) {
+      // the end of the new item
+      p.m_delegate->m_trainfo.cur_transport_state = "STOPPED";
+      p.WorkerStep();
+      p.WorkerStep();
+      CHECK(cb.ended == 1 && cb.stopped == 0);
+    }
+  }
+}
+
+// A worker poll sent before an open and answered after the open does not
+// replace the state that the open published.
+void stale_poll() {
+  Begin("poll answered after a reopen");
+  IPlayerCallback cb;
+  CUPnPPlayer p(cb, "P");
+  CHECK(p.OpenFile(Item("http://server/current.mkv"), CPlayerOptions()));
+  CHECK(p.m_delegate->GetTransportState() == "PLAYING");
+  // the worker sends a poll; the renderer answers STOPPED, two rounds late
+  p.m_delegate->nextState = "STOPPED";
+  p.m_delegate->pollDue = true;
+  p.WorkerStep();
+  CHECK(g_ctl.log.back() == "P:GetTransportInfo");
+  g_ctl.pending.back().delay = 1;
+  p.m_delegate->firstState = "PLAYING";
+  p.m_delegate->infoCalls = 0;
+  CHECK(p.OpenFile(Item("http://server/next.mkv"), CPlayerOptions()));
+  CHECK(g_ctl.pending.empty());  // the poll was answered during the open
+  p.WorkerStep();
+  CHECK(p.m_delegate->GetTransportState() == "PLAYING" && cb.ended == 0);
+  // a poll sent after the open publishes the state
+  p.m_delegate->nextState = "STOPPED";
+  p.m_delegate->pollDue = true;
+  p.WorkerStep();
+  DeliverPending();
+  p.WorkerStep();
+  CHECK(p.m_delegate->GetTransportState() == "STOPPED" && cb.ended == 1);
+}
+
+// A command lives until the renderer answers the command, also after the wait
+// for the answer ended: the address of the command stays registered, so no
+// newer command takes the address while the answer can arrive.
+void abandoned_command() {
+  Begin("command abandoned by a close");
+  IPlayerCallback cb;
+  CUPnPPlayer p(cb, "P");
+  void* abandoned = nullptr;
+  g_waitHook = [&](int w) {
+    if (w != 2)  // the wait for the answer to SetAVTransportURI
+      return;
+    g_waitHook = nullptr;
+    g_ctl.pending.back().delay = 2;
+    abandoned = g_ctl.pending.back().userdata;
+    CHECK(p.CloseFile());
+  };
+  CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+  CHECK(abandoned && Registered(abandoned));
+  DeliverPending();
+  DeliverPending();
+  CHECK(g_ctl.pending.empty() && Registered(abandoned));
+  // the answered command is freed later; the player opens again
+  CHECK(p.OpenFile(Item(), CPlayerOptions()));
+}
+
 void close_during_last_command() {
+  // The last command of an open with a start time is Seek, without a wait after
+  // the command: a close on another thread after the last wait ends the open.
   Begin("close while the last command is sent");
   IPlayerCallback cb;
-  int infos = 0;
   {
     CUPnPPlayer p(cb, "P");
     g_ctl.cmdHook = [&](const std::string& c) {
-      if (c == "P:GetTransportInfo" && ++infos == 3) {
+      if (c == "P:Seek") {
         g_ctl.cmdHook = nullptr;
         CHECK(p.CloseFile());
       }
     };
-    CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    CPlayerOptions options;
+    options.starttime = 10;
+    CHECK(!p.OpenFile(Item(), options));
     CHECK(cb.Total() == 0 && p.creates == 0 && !p.running);
   }
-  auto want = Of("P", Head(NORMAL, 5));
+  auto want = Of("P", Head(NORMAL, 4));
+  want.push_back("P:Seek");
   want.push_back("P:Stop");
   ExpectLog(want);
 }
@@ -620,6 +826,10 @@ int main(int argc, char** argv) {
       {"newer_player_on_same_renderer", newer_player_on_same_renderer},
       {"newer_open_on_same_player", newer_open_on_same_player},
       {"rejected_stop", rejected_stop},
+      {"transitioning_renderer", transitioning_renderer},
+      {"reopen_notifications", reopen_notifications},
+      {"stale_poll", stale_poll},
+      {"abandoned_command", abandoned_command},
       {"close_during_last_command", close_during_last_command},
       {"attach", attach}};
   if (argc > 1) {
@@ -642,7 +852,7 @@ CONTROLS = [
     ('wait does not check the open sequence',
      'if (open != m_openSequence)\n  {\n    m_logger->debug', 'if (false)\n  {\n    m_logger->debug'),
     ('Play does not mark the renderer as started',
-     '  m_stopremote = true;\n  NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '  NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
+     '    m_stopremote = true;\n    NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '    NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
     ('OpenFile does not start a new open',
      'const uint64_t open = ++m_openSequence;', 'const uint64_t open = m_openSequence;'),
     ('OpenFile does not check the open sequence before starting',
@@ -652,22 +862,44 @@ CONTROLS = [
     ('CloseFile can stop the renderer twice',
      '    m_stopremote = false;\n  }', '  }'),
     ('CloseFile drops the renderer before the stop succeeds',
-     'if (m_stopremote)\n  {\n    m_delegate', 'if (m_stopremote.exchange(false))\n  {\n    m_delegate'),
+     'if (m_stopremote)\n  {\n    const auto stop', 'if (m_stopremote.exchange(false))\n  {\n    const auto stop'),
+    ('all commands share one answer',
+     'CEvent m_event;\n  NPT_Result m_status = NPT_FAILURE;',
+     'static inline CEvent m_event;\n  static inline NPT_Result m_status = NPT_FAILURE;'),
+    ('a command is freed before the answer arrives',
+     'return commands->emplace_back(std::make_shared<CUPnPCommand>());',
+     'return std::make_shared<CUPnPCommand>();'),
+    ('the open does not publish the state of the renderer',
+     '  m_delegate->SetTransportInfo(info.m_trainfo);\n  ++m_stateEpoch;', '  ++m_stateEpoch;'),
+    ('a poll sent before the state of an open replaces the state',
+     'if (m_pollEpoch == m_stateEpoch)', 'if (true)'),
+    ('a reopen keeps the end notification of the replaced item',
+     'const bool reopen = m_started.exchange(false);', 'const bool reopen = m_started;'),
+    ('a failed reopen does not report the stop of the replaced item',
+     'if (reopen && !m_started)\n', 'if (reopen && false)\n'),
+    ('the worker reports the end twice',
+     'if (m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false))',
+     'if (m_delegate->GetTransportState() == "STOPPED" && m_started)'),
 ]
 
 
 def production():
     source = (ROOT / 'xbmc/network/upnp/UPnPPlayer.cpp').read_text()
     header = (ROOT / 'xbmc/network/upnp/UPnPPlayer.h').read_text()
-    wait = re.search(r'(?:static NPT_Result |int CUPnPPlayer::)WaitOnEvent\(', source).group(0)
-    signatures = [wait, 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
-                  'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()']
+    command = source.index('class CUPnPCommand : public PLT_MediaControllerDelegate')
+    command = source[command:source.index('\n};\n', command) + 4]
+    command += function(source, 'static std::shared_ptr<CUPnPCommand> NewCommand()')
+    signatures = ['int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
+                  'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()',
+                  'void CUPnPPlayer::PublishTransportInfo(', 'void CUPnPPlayer::PollTransportInfo(']
     body = '\n'.join(function(source, signature) for signature in signatures)
-    stop = 'std::atomic<bool>' if 'std::atomic<bool> m_stopremote' in header else 'bool'
-    waitdecl = ('int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);'
-                if 'CUPnPPlayer::WaitOnEvent(' in wait else '')
-    code = (PRELUDE.replace('@WAITDECL@', waitdecl).replace('@STOPTYPE@', stop)
-            .replace('@PRODUCTION@', 'namespace UPNP {\n' + body + '\n}  // namespace UPNP'))
+    # The worker: one pass of the Process loop.
+    process = function(source, 'void CUPnPPlayer::Process()')
+    poll = '    PollTransportInfo(m_delegate->UpdatePositionInfo());\n'
+    assert poll in process
+    worker = poll + function(process, '    if (m_started)')
+    body += '\nvoid CUPnPPlayer::WorkerStep()\n{\n' + worker + '\n}\n'
+    code = PRELUDE.replace('@PRODUCTION@', 'namespace UPNP {\n' + command + body + '\n}  // namespace UPNP')
     return code, header
 
 
@@ -680,6 +912,7 @@ def main():
     # The header must declare the state the production methods use.
     assert 'std::atomic<uint64_t> m_openSequence' in header, 'm_openSequence must be atomic (CloseFile runs on another thread)'
     assert 'std::atomic<bool> m_stopremote' in header, 'm_stopremote must be atomic'
+    assert 'std::atomic<bool> m_started' in header, 'm_started must be atomic (the worker thread reads the flag)'
     assert 'int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);' in header
     if args.negative_controls:
         for label, before, after in CONTROLS:
@@ -690,7 +923,8 @@ def main():
 
 CASES = ['normal_open_close', 'close_twice', 'reopen', 'close_inside_wait',
          'close_inside_wait_renderer_playing', 'newer_player_on_same_renderer',
-         'newer_open_on_same_player', 'rejected_stop', 'close_during_last_command', 'attach']
+         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command',
+         'close_during_last_command', 'attach']
 
 
 def run(code, expect_failure=False, label=''):
