@@ -148,7 +148,8 @@ using Logger = std::shared_ptr<LoggerImpl>;
 struct CDataCacheCore {
   float speed = 1.0f;
   static CDataCacheCore& GetInstance() { static CDataCacheCore c; return c; }
-  void Reset() {}
+  // the production reset restores the default state of every player
+  void Reset() { speed = 1.0f; }
   void SetPlayTimes(int64_t, int64_t, int64_t, int64_t) {}
   float GetSpeed() const { return speed; }
   void SetSpeed(float, float s) { speed = s; }
@@ -452,6 +453,7 @@ public:
   IPlayerCallback& m_callback;
   std::atomic<bool> m_started{false};
   std::atomic<bool> m_stopremote{false};
+  std::atomic<bool> m_closed{false};
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting;
@@ -1147,7 +1149,31 @@ void missing_renderer() {
   }
 }
 
-#define CASES(X) X(missing_renderer) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
+// The application retires a player after the close completes and creates a newer
+// player. A delayed destructor of the retired player, for example after the open
+// of the retired player returns, keeps the cache of the newer player.
+void destroy_after_close() {
+  for (bool renderer : {true, false}) {
+    Begin("the destructor of a closed player keeps the cache");
+    IPlayerCallback cb;
+    {
+      CUPnPPlayer p(cb, "P");
+      if (renderer)
+        CHECK(p.OpenFile(Item(), CPlayerOptions()));
+      else {
+        CUPnP::UnregisterUserdata(p.m_delegate.get());
+        p.m_delegate.reset();
+      }
+      Close(p);
+      CDataCacheCore::GetInstance().speed = 0.0f;  // the newer player pauses
+      CHECK(p.CloseFile());
+    }
+    CHECK(CDataCacheCore::GetInstance().speed == 0.0f);
+    CDataCacheCore::GetInstance().speed = 1.0f;
+  }
+}
+
+#define CASES(X) X(missing_renderer) X(destroy_after_close) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
   X(close_inside_wait_renderer_playing) X(newer_player_on_same_renderer) X(refused_stop) \
   X(unanswered_stop) X(one_end_notification) X(destroy_during_close) X(transitioning_renderer) \
   X(abandoned_command) X(failed_send) X(close_unanswered_wait) X(close_during_last_command) \
@@ -1174,8 +1200,15 @@ int main(int argc, char** argv) {
 # passes would not prove the check.
 CONTROLS = [
     ('a close without a renderer never completes',
-     '  if (!m_delegate)\n  {\n    CServiceBroker::GetDataCacheCore().Reset();\n    return true;\n  }\n',
+     '  if (!m_delegate)\n  {\n    CServiceBroker::GetDataCacheCore().Reset();\n    m_closed = true;\n    return true;\n  }\n',
      '  if (!m_delegate)\n    return false;\n'),
+    ('a repeated close resets the cache of a newer player', '  if (m_closed)\n    return true;\n', ''),
+    ('a completed close without a renderer is not recorded',
+     '    CServiceBroker::GetDataCacheCore().Reset();\n    m_closed = true;\n    return true;\n  }\n',
+     '    CServiceBroker::GetDataCacheCore().Reset();\n    return true;\n  }\n'),
+    ('a completed close is not recorded',
+     '  StopThread(true);\n  CServiceBroker::GetDataCacheCore().Reset();\n  m_closed = true;\n',
+     '  StopThread(true);\n  CServiceBroker::GetDataCacheCore().Reset();\n'),
     ('the open without a renderer uses the renderer',
      '  // the renderer disappeared before the creation of the player\n  NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);\n', ''),
     ('wait does not check the open sequence',
@@ -1286,6 +1319,7 @@ def main():
     # The header must declare the state the production methods use.
     assert 'std::atomic<uint64_t> m_openSequence' in header, 'm_openSequence must be atomic (CloseFile runs on another thread)'
     assert 'std::atomic<bool> m_stopremote' in header, 'm_stopremote must be atomic'
+    assert 'std::atomic<bool> m_closed' in header, 'm_closed must be atomic (the worker calls CloseFile)'
     assert 'std::atomic<bool> m_started' in header, 'm_started must be atomic (the worker thread reads the flag)'
     # Platinum calls the router (CMediaController); the router forwards an answer
     # to a registered userdata. Every answer of a command needs a forwarder.

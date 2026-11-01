@@ -82,6 +82,8 @@ private:
   std::string m_current_meta;
   std::atomic<bool> m_started{false};
   std::atomic<bool> m_stopremote{false};
+  // the worker also calls CloseFile after the loop ends
+  std::atomic<bool> m_closed{false};
   // The current open; a close advances the sequence
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;

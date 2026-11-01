@@ -586,6 +586,10 @@ failed:
 
 bool CUPnPPlayer::CloseFile(bool reopen)
 {
+  // A completed close is final. The application can create a newer player before
+  // the destructor of this player: a repeated close resets the cache of the newer player.
+  if (m_closed)
+    return true;
   // stops an OpenFile that waits for the renderer
   CancelOpen();
   // a player without a renderer opened nothing: the close completes, and the
@@ -593,6 +597,7 @@ bool CUPnPPlayer::CloseFile(bool reopen)
   if (!m_delegate)
   {
     CServiceBroker::GetDataCacheCore().Reset();
+    m_closed = true;
     return true;
   }
   {
@@ -635,6 +640,7 @@ bool CUPnPPlayer::CloseFile(bool reopen)
 
   StopThread(true);
   CServiceBroker::GetDataCacheCore().Reset();
+  m_closed = true;
   return true;
 }
 
