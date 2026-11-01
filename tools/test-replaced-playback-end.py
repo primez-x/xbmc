@@ -857,6 +857,20 @@ def compile_run(code, label):
                         str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         subprocess.run([str(out / 'test')], check=True, timeout=15)
 
+# A seek into another part of a stopped stack, during the close of the old
+# player, restarts nothing: the stopped player plays nothing.
+SEEK = r"""
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;app.stack.regular=true;
+  app.StopPlaying();app.Stopped();
+  assert(app.player.m_closingPlayer==old&&!app.player.IsPlaying());
+  app.SeekTime(120);
+  assert(!CServiceBroker::messenger.queued&&old->seeks==0&&app.stack.position==0);
+  old->canClose=true;app.Frame();
+  assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen());
+ }
+"""
+
 
 def main():
     source = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
@@ -991,6 +1005,26 @@ static void QueueMusic(){
 }
 #undef g_application
 int main(){""", 1)
+    # The base program also runs the production stack seek.
+    base = base.replace('struct CFileItem {', 'struct CFileItem {void SetStartOffset(uint64_t){}', 1)
+    base = base.replace('struct IPlayer {', 'struct IPlayer {int seeks=0;void SeekTime(int64_t){++seeks;}', 1)
+    base = base.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {bool CanSeek()const{return true;}'
+                        'void SeekTime(int64_t);std::shared_ptr<IPlayer> GetControllable();', 1)
+    base = base.replace('struct CApplicationStackHelper {', 'struct CApplicationStackHelper {int position=0;'
+                        'int GetStackPartNumberAtTimeMs(uint64_t t){return t>=100000?1:0;}'
+                        'uint64_t GetStackPartStartTimeMs(int part){return part*100000;}'
+                        'int GetCurrentPartNumber(){return position;}void SetStackPartCurrentFileItem(int p){position=p;}'
+                        'CFileItem GetCurrentStackPartFileItem(){CFileItem item;item.id=100+position;return item;}', 1)
+    assert 'struct Messenger {void PostMsg(int){}};' in base
+    base = base.replace('struct Messenger {void PostMsg(int){}};', 'constexpr int TMSG_MEDIA_PLAY=8;\n'
+                        'struct Messenger {void* queued=nullptr;void PostMsg(int){}'
+                        'void PostMsg(int,int,int,void* payload){queued=payload;}};', 1)
+    base = base.replace('struct CApplication {', 'struct CApplication {void SeekTime(double);', 1)
+    base = base.replace(' std::cout<<"PASS replaced playback end', SEEK + ' std::cout<<"PASS replaced playback end', 1)
+    base += function(source, 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()')
+    base += function(source, 'void CApplicationPlayer::SeekTime(')
+    base += function(application, 'void CApplication::SeekTime(')
+    base = base.replace('Playlist.PlayOffset and queue\\n"', 'Playlist.PlayOffset and queue; stack seek\\n"', 1)
     compile_run(base, '')
     compile_run(production_play(code, playlist, function), '-play')
     compile_run(menu_program(play), '-menu')
