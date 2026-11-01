@@ -125,6 +125,17 @@ int main(){
   assert(CServiceBroker::announcements.stops==1);
   opensLatest(app,old);
  }
+ // A remote player is never reused: a newer open replaces the playing player, so
+ // every notification of the replaced item comes before the newer open. The end
+ // that the closing player reports does not continue the playlist.
+ {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;
+  replace(app);
+  assert(app.player.m_closingPlayer==old&&old->opens==0&&old->closes==1);
+  app.Ended();
+  assert(app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==42);
+  assert(CServiceBroker::pvr.ended==0&&CServiceBroker::gui.wm.threadMessages==0);
+  opensLatest(app,old);}
  // A normal end still continues the playlist and the EPG autoplay.
  {CApplication app;begin(app);reset();app.Ended();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_ENDED);
   assert(CServiceBroker::pvr.ended==1&&CServiceBroker::pvr.stopped==0);

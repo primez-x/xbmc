@@ -271,9 +271,6 @@ private:
   uint64_t m_openGeneration{0};
   std::optional<uint64_t> m_cleanupGeneration;
   bool m_cleanupPending{false};
-  // The player in a backend open; a backend that processes messages during the
-  // open (UPnP) can receive a newer open
-  IPlayer* m_openingPlayer{nullptr};
   mutable CCriticalSection m_playerLock;
   CSeekHandler m_seekHandler;
 

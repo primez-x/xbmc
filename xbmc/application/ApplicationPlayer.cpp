@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <mutex>
-#include <utility>
 
 using namespace std::chrono_literals;
 
@@ -170,12 +169,14 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   Supersede(Supersession::OPEN);
   const std::string newPlayer = playerName.empty() ? factory.GetDefaultPlayer(item) : playerName;
   auto player = GetInternal();
-  // A newer open during the backend open of an older open replaces the player:
-  // one backend never runs two opens, and the newer open gets a new player.
+  // Only VideoPlayer opens the next item in the playing player. A remote player
+  // (UPnP) opens synchronously and processes messages during the open, so a
+  // newer item replaces the player: the close of the old player delivers every
+  // notification of the old item before the newer open, and a newer open
+  // during the open of a remote player never runs in the same player.
   const bool replace = player &&
-      (m_closingPlayer || player.get() == m_openingPlayer || !player->IsPlaying() ||
-       item.IsDiscImage() || item.IsDVDFile() ||
-       player->m_name != newPlayer || (player->m_type != "video" && player->m_type != "remote"));
+      (m_closingPlayer || !player->IsPlaying() || item.IsDiscImage() || item.IsDVDFile() ||
+       player->m_name != newPlayer || player->m_type != "video");
   if (replace)
   {
     // One owned latest intent. Closing the original is never cancelled by a
@@ -197,9 +198,7 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
       return false;
   }
 
-  IPlayer* const opening = std::exchange(m_openingPlayer, player.get());
   bool ret = player->OpenFile(item, options);
-  m_openingPlayer = opening;
   // A backend that processes messages during the open (UPnP) can run a stop,
   // which retired the player, or a newer open, which owns the state.
   if (OpenSuperseded(intent))
