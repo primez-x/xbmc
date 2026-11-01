@@ -26,10 +26,12 @@ PRELUDE = r'''
 #include <algorithm>
 #include <vector>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 struct CEvent {bool signaled=false;void Set(){signaled=true;}};
 struct CCriticalSection {
@@ -69,7 +71,7 @@ struct CApplicationPlayer {
   mutable CCriticalSection m_playerLock;
   std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
-  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;int m_controls=0;
+  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;std::map<std::thread::id,int> m_controls;
   enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
   uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0,m_lastAcceptedIntent=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
   uint64_t BeginOpen();void EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
@@ -107,7 +109,9 @@ CONTROLS_PLAYER = '''
   void Pause(){++controls;}void Seek(bool,bool,bool){++controls;}void SeekPercentage(float){++controls;}
   int SeekChapter(int){++controls;return 0;}bool SeekScene(bool){++controls;return true;}
   void SeekTime(int64_t){++controls;}bool SeekTimeRelative(int64_t){++controls;return true;}
-  void SetSpeed(float){++controls;}void SetTempo(float){++controls;}void FrameAdvance(int){++controls;}
+  // A control that runs a modal dialog of the player (the Game OSD) runs frames.
+  std::function<void()> duringControl;
+  void SetSpeed(float){++controls;if(auto hook=std::exchange(duringControl,nullptr))hook();}void SetTempo(float){++controls;}void FrameAdvance(int){++controls;}
   bool OnAction(const CAction&){++controls;return true;}'''
 CONTROLS_ROUTER = '''
   std::shared_ptr<IPlayer> GetControllable();bool SeekWaitingItem(int64_t,bool);
@@ -185,20 +189,39 @@ static void volume_after_open(){
 // Python) reaches the old player before the newer player opens: the old backend
 // changes no shared state of the newer playback (the data cache, the pause
 // notification) (Sol's round 39 probe). The close completes after the control,
-// without another close of the player.
+// without another close of the player. The main thread runs between the control
+// and the backend call.
 static void speed_after_replacement(){
   CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
   CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
-  app.queryHook=[&]{
+  app.queryHook=[&]{std::thread([&]{
     app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
     CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
     old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
-    assert(app.m_closingPlayer==old&&app.m_nextItem.pItem&&app.created==0&&old->controls==0);};
+    assert(app.m_closingPlayer==old&&app.m_nextItem.pItem&&app.created==0&&old->controls==0);}).join();};
   app.SetPlaySpeed(1);
   assert(old->controls==1&&app.m_closingPlayer==old&&app.created==0);
   app.ContinueClose();app.OpenNext(factory);
   auto current=app.GetInternal();
   assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1&&old->closes==3);
+}
+// A control on the main thread that runs a modal dialog of the player (the Game
+// OSD that a pause of a game opens) runs the frames of the application below the
+// control. A stop in the dialog completes the close in those frames, and a newer
+// open plays: the close waits only for the controls of other threads (Sol's round
+// 40 finding). The control ends without another close of the player.
+static void control_runs_close(){
+  CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
+  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+  old->duringControl=[&]{
+    old->canClose=true;assert(app.ClosePlayer());
+    assert(!app.m_closingPlayer&&!app.GetInternal());
+    CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
+    assert(app.GetInternal()&&app.GetInternal()!=old&&app.GetInternal()->lastItem==2);};
+  app.SetPlaySpeed(0);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->controls==0&&old->controls==1&&old->closes==1);
+  assert(app.m_controls.empty());
 }
 // A newer item that waits for the close of the old player takes the time of an
 // absolute or relative seek, like a new request for the time: the start time
@@ -265,6 +288,7 @@ int main(){
   controls_during_close();
   volume_after_open();
   speed_after_replacement();
+  control_runs_close();
   seek_waiting_item();
   shutdown_cases();
   discarded_notifications();
@@ -487,6 +511,8 @@ static void shutdown_cases() {
             ('shutdown admits replacement', 'if (m_shutdown)', 'if (false)'),
             ('discarded terminal not acknowledged', 'appPlayer->OnPlaybackStopped();', '(void)appPlayer;'),
             ('shutdown tears down early', 'if (!appPlayer->ClosePlayer(true))', 'if (!appPlayer->ClosePlayer(true) && false)'),
+            ('close ignores running controls', 'return control.first != thread;', 'return control.first != thread && false;'),
+            ('close waits for own thread', 'return control.first != thread;', 'return control.first != thread || true;'),
         ]:
             assert before in code
             run(code.replace(before, after), True)
@@ -499,7 +525,7 @@ def run(code, expect_failure=False):
         out = Path(temporary)
         (out / 'test.cpp').write_text(code)
         subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra',
-                        '-Werror', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                        '-Werror', '-pthread', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                         '-fno-pie', '-no-pie', str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         result = subprocess.run([str(out / 'test')], capture_output=True, text=True, timeout=10)
         if expect_failure:

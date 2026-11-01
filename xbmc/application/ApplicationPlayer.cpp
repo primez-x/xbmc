@@ -51,10 +51,12 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()
   // JSON-RPC, Python) can reach the player after the close. The close completes
   // after the control, so the control changes no shared state of a newer
   // playback (the data cache, the pause notification).
-  ++m_controls;
-  return std::shared_ptr<IPlayer>(m_pPlayer.get(), [this, player = m_pPlayer](IPlayer*) {
+  const auto thread = std::this_thread::get_id();
+  ++m_controls[thread];
+  return std::shared_ptr<IPlayer>(m_pPlayer.get(), [this, player = m_pPlayer, thread](IPlayer*) {
     std::unique_lock<CCriticalSection> lock(m_playerLock);
-    --m_controls;
+    if (--m_controls[thread] == 0)
+      m_controls.erase(thread);
   });
 }
 
@@ -101,9 +103,13 @@ void CApplicationPlayer::ContinueClose()
 
   {
     std::unique_lock<CCriticalSection> lock(m_playerLock);
-    // A control that took the player before the close still runs: the main
-    // thread does not wait, and the next frame completes the close.
-    if (m_controls > 0)
+    // A control on another thread that took the player before the close still
+    // runs: the main thread does not wait, and the next frame completes the
+    // close. A control on this thread is below this frame: a modal dialog of the
+    // player (the Game OSD of a pause) runs the frames until the close completes.
+    const auto thread = std::this_thread::get_id();
+    if (std::any_of(m_controls.begin(), m_controls.end(),
+                    [thread](const auto& control) { return control.first != thread; }))
       return;
     if (m_pPlayer == original)
       m_pPlayer.reset();
