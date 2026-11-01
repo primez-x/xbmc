@@ -349,6 +349,14 @@ bool CPlayListPlayer::Play(int iSong,
   if (iSong >= playlistSize)
     iSong = playlistSize - 1;
 
+  // A stop or a newer open supersedes the attempt, also a restart of the same
+  // item; a superseded attempt is not a failed item. The attempt starts before
+  // the expansion and lasts until the failure handling started the next item.
+  const auto appPlayer =
+      CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+  const KODI::UTILS::CScopeGuard<uint64_t, 0, void(uint64_t)> attempt(
+      [&](uint64_t intent) { g_application.EndOpen(intent); }, appPlayer->BeginOpen());
+
   // check if the item itself is a playlist, and can be expanded
   // only allow a few levels, this could end up in a loop
   // if they refer to each other in a loop
@@ -357,6 +365,10 @@ bool CPlayListPlayer::Play(int iSong,
     if(!playlist.Expand(iSong))
       break;
   }
+  // The expansion can wake a network share, and the wake dialog processes
+  // messages: a stop or a newer open during the dialog supersedes the attempt
+  if (appPlayer->OpenSuperseded(attempt))
+    return false;
 
   const CFileItemPtr item = playlist.TryGet(iSong);
   if (!item)
@@ -370,13 +382,6 @@ bool CPlayListPlayer::Play(int iSong,
   m_bPlaybackStarted = false;
 
   const auto playAttempt = std::chrono::steady_clock::now();
-  // A stop or a newer open supersedes the attempt, also a restart of the same
-  // item; a superseded attempt is not a failed item. The attempt lasts until
-  // the failure handling started the next item.
-  const auto appPlayer =
-      CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
-  const KODI::UTILS::CScopeGuard<uint64_t, 0, void(uint64_t)> attempt(
-      [&](uint64_t intent) { g_application.EndOpen(intent); }, appPlayer->BeginOpen());
   bool ret = g_application.PlayFile(*item, player, bAutoPlay, true, attempt);
   const bool superseded = appPlayer->OpenSuperseded(attempt);
   // OpenFile can release GUI ownership while Python changes the playlist.

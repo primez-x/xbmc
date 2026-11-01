@@ -426,6 +426,22 @@ int main(){
   assert(!playlist.Play(0,"old"));
   assert(playlist.list.unplayable==0&&playlist.GetCurrentPlaylist()==TYPE_NONE&&!app.player.HasPlayer());
  }
+ // A stop or a newer item that reaches the player during the expansion of a
+ // playlist item cancels the item before the playlist changes.
+ for(bool newer:{false,true}){CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;playlist.m_iCurrentSong=1;int after=-2,list=-2;
+  expansion=[&]{
+   if(!newer)app.StopPlaying(),app.player.OnPlaybackStopped(),app.Frame();
+   else{CFileItem c;c.id=50;assert(app.PlayFile(c,"old",false,false));
+    app.player.OnPlaybackStopped();app.Frame();assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50);}
+   after=playlist.m_iCurrentSong.load();list=playlist.GetCurrentPlaylist();};
+  assert(!playlist.Play(0,"old"));
+  // the cancelled attempt leaves the playlist as the stop or the newer item left the playlist
+  assert(playlist.list.unplayable==0&&playlist.m_iCurrentSong.load()==after&&after!=0);
+  assert(playlist.GetCurrentPlaylist()==list&&app.stackPlays==(newer?1:0));
+  if(newer)assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.HasPendingOpen());
+  else assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen());
+ }
  // The same, but the user restarts the item from the playlist during the
  // resolution: the restart plays, and the cancelled attempt changes nothing.
  {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
@@ -619,10 +635,12 @@ struct SettingsComponent {
     old = 'struct CPlayList {int size()const{return 2;}int GetPlayable()const{return 2;}};'
     assert code.count(old) == 1
     code = code.replace(old, """using CFileItemPtr=std::shared_ptr<CFileItem>;
+// The expansion of a playlist item can process messages (the wake-on-access dialog).
+static std::function<void()> expansion;
 struct CPlayList {
  std::vector<CFileItemPtr> items{std::make_shared<CFileItem>(),std::make_shared<CFileItem>()};int unplayable=0;
  int size()const{return items.size();}int GetPlayable()const{return size()-unplayable;}
- bool Expand(int){return false;}CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?items[n]:nullptr;}
+ bool Expand(int){if(auto hook=std::exchange(expansion,{}))hook();return false;}CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?items[n]:nullptr;}
  void SetPlayed(bool){}void SetUnPlayable(int){++unplayable;}void Clear(){items.clear();}
 };""")
     # An abandoned resolution fails one item only
