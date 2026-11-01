@@ -2704,11 +2704,13 @@ bool CApplication::PlayStackPart(int part, CFileItem item)
 {
   const auto appPlayer = GetComponent<CApplicationPlayer>();
   const auto intent = appPlayer->BeginOpen();
-  m_stackPartOpen = {intent, part};
+  // A part open during the resolution of an older part open (a dialog) is newer.
+  // When the newer open fails before the player, the older open continues.
+  const StackPartOpen older = std::exchange(m_stackPartOpen, {intent, part});
   const bool ret = PlayFile(std::move(item), "", true, false, intent);
   // a failed or superseded open leaves the stack at the playing part
   if (m_stackPartOpen.intent == intent)
-    m_stackPartOpen = {};
+    m_stackPartOpen = older;
   EndOpen(intent);
   return ret;
 }

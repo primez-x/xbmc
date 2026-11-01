@@ -907,6 +907,17 @@ SEEK = r"""
   old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==100+part);
  }
+ // a newer part open that fails before the player during the open of another
+ // part: the older part open stays the user's intent and changes the part
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;app.stack.regular=true;
+  app.nested=[&]{app.abandon=true;app.SeekTime(30);app.abandon=false;
+   assert(app.stack.position==0&&app.m_stackPartOpen.part==1);};
+  app.SeekTime(120);
+  assert(old->seeks==0&&app.stack.position==1&&app.player.HasPendingOpen()&&app.stackPlays==2);
+  assert(app.player.m_nextItem.pItem->id==101&&app.player.m_nextItem.pItem->startOffset==20000);
+  assert(app.m_stackPartOpen.intent==0);
+ }
  // a failed open of another part leaves the stack at the playing part
  {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;app.abandon=true;
