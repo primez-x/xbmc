@@ -2700,6 +2700,19 @@ void CApplication::EndOpen(uint64_t intent)
     PlaybackCleanup();
 }
 
+bool CApplication::PlayStackPart(int part, CFileItem item)
+{
+  const auto appPlayer = GetComponent<CApplicationPlayer>();
+  const auto intent = appPlayer->BeginOpen();
+  m_stackPartOpen = {intent, part};
+  const bool ret = PlayFile(std::move(item), "", true, false, intent);
+  // a failed or superseded open leaves the stack at the playing part
+  if (m_stackPartOpen.intent == intent)
+    m_stackPartOpen = {};
+  EndOpen(intent);
+  return ret;
+}
+
 bool CApplication::StartPlayback(CFileItem item,
                                  const std::string& player,
                                  bool bRestart,
@@ -2992,6 +3005,11 @@ bool CApplication::StartPlayback(CFileItem item,
     stackHelper->Adopt(std::move(staged->stack));
   else if (!bRestart)
     stackHelper->Clear();
+  else if (m_stackPartOpen.intent == intent)
+  {
+    stackHelper->SetStackPartCurrentFileItem(m_stackPartOpen.part);
+    m_stackPartOpen = {};
+  }
   if (!bRestart || (staged && !staged->restart))
   {
     appPlayer->SetPlaySpeed(1);
@@ -3449,7 +3467,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
     if (!superseded && stackHelper->IsPlayingRegularStack() &&
         stackHelper->HasNextStackPartFileItem())
     { // just play the next item in the stack
-      PlayFile(stackHelper->SetNextStackPartCurrentFileItem(), "", true);
+      const int part = stackHelper->GetCurrentPartNumber() + 1;
+      PlayStackPart(part, std::as_const(*stackHelper).GetStackPartFileItem(part));
       return true;
     }
 
@@ -3987,18 +4006,20 @@ void CApplication::SeekStackTime(int64_t timeMs)
   // find the item in the stack we are seeking to, and load the new file if
   // necessary, and calculate the correct seek within the new file. The seek in
   // the current part also reaches a part that waits for the close of the
-  // previous part.
+  // previous part. While the open of a part is not accepted, the seek opens the
+  // part of the seek again, so the newest seek wins.
   const int part = stackHelper->GetStackPartNumberAtTimeMs(static_cast<uint64_t>(timeMs));
   const uint64_t startOfPart = stackHelper->GetStackPartStartTimeMs(part);
-  if (part == stackHelper->GetCurrentPartNumber())
+  const bool partOpening =
+      m_stackPartOpen.intent && !appPlayer->OpenSuperseded(m_stackPartOpen.intent);
+  if (part == stackHelper->GetCurrentPartNumber() && !partOpening)
   {
     appPlayer->SeekTime(timeMs - startOfPart);
     return;
   }
-  stackHelper->SetStackPartCurrentFileItem(part);
-  CFileItem item(stackHelper->GetCurrentStackPartFileItem());
+  CFileItem item(std::as_const(*stackHelper).GetStackPartFileItem(part));
   item.SetStartOffset(timeMs - startOfPart);
-  PlayFile(std::move(item), "", true);
+  PlayStackPart(part, std::move(item));
 }
 
 void CApplication::SeekTime( double dTime )

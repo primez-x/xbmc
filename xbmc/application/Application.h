@@ -268,6 +268,15 @@ protected:
                   uint64_t intent);
   struct StagedStack;
   bool PlayStack(CFileItem& item, bool bRestart, uint64_t intent);
+  // Opens another part of the current stack. The stack plays the part when the
+  // open is accepted.
+  bool PlayStackPart(int part, CFileItem item);
+  // The open of a part of the current stack that is not accepted yet
+  struct StackPartOpen
+  {
+    uint64_t intent = 0;
+    int part = -1;
+  } m_stackPartOpen;
   bool StartPlayback(CFileItem item,
                      const std::string& player,
                      bool bRestart,

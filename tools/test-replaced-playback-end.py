@@ -35,7 +35,8 @@ HARNESS = HARNESS.replace(
     'struct CApplicationStackHelper {int clears=0,adopts=0;bool regular=false,next=false;void Clear(){++clears;}'
     'void Adopt(CApplicationStackHelper&&){++adopts;}'
     'bool IsPlayingRegularStack(){return regular;}bool HasNextStackPartFileItem(){return next;}'
-    'CFileItem SetNextStackPartCurrentFileItem(){CFileItem part;part.id=77;return part;}};')
+    'int position=0;int GetCurrentPartNumber(){return position;}void SetStackPartCurrentFileItem(int p){position=p;}'
+    'CFileItem GetStackPartFileItem(int p)const{CFileItem part;part.id=100+p;return part;}};')
 HARNESS = HARNESS.replace(
     'struct CApplication;',
     'struct CApplication;\n'
@@ -83,9 +84,10 @@ HARNESS = HARNESS.replace(
     ' bool StartPlayback(CFileItem item,const std::string& name,bool bRestart,bool playlistItem,uint64_t intent){\n'
     '  ++stackPlays;Intent(item,bRestart,playlistItem);if(nested){auto open=std::move(nested);open();}\n'
     '  if(abandon)return false;\n'
-    '  const auto appPlayer=&player;@CANCELLED@Acceptance(item,bRestart);\n'
+    '  const auto appPlayer=&player;@CANCELLED@Acceptance(item,bRestart,intent);\n'
     '  const bool ret=player.OpenFile(item,{},services.factory,name,callback,intent);@CANCELLED@Accept(bRestart,playlistItem);return ret;}\n'
-    ' bool Ended();bool Stopped();void EndOpen(uint64_t intent);void Acceptance(CFileItem& item,bool bRestart);\n void Frame(){')
+    ' bool Ended();bool Stopped();void EndOpen(uint64_t intent);void Acceptance(CFileItem& item,bool bRestart,uint64_t intent);\n'
+    ' struct StackPartOpen{uint64_t intent=0;int part=-1;} m_stackPartOpen;bool PlayStackPart(int part,CFileItem item);\n void Frame(){')
 PRELUDE = PRELUDE.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {void SetPlaySpeed(float){}')
 TESTS = r"""
 @PLAYLISTFUNCTIONS@
@@ -98,7 +100,7 @@ void CApplication::Intent([[maybe_unused]] CFileItem item,bool bRestart,bool pla
  @ENDPLAYLIST@@INTENT@}
 // The production effects of an accepted open on the current playback.
 struct StagedStack {CApplicationStackHelper stack;bool restart=false;};
-void CApplication::Acceptance(CFileItem& item,bool bRestart){
+void CApplication::Acceptance(CFileItem& item,bool bRestart,uint64_t intent){
  const auto appPlayer=&player;const auto stackHelper=&stack;StagedStack* staged=nullptr;@ACCEPTANCE@}
 // The open repeats the reset once accepted, after a dialog or a resolution.
 void CApplication::Accept(bool bRestart,bool playlistItem){@ENDPLAYLIST@ endPlaylist();}
@@ -892,6 +894,35 @@ SEEK = r"""
   old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==100);
  }
+ // a newer seek during the open of another part (a dialog) plays the part of
+ // the newest seek: the stack plays the old part until the open is accepted
+ for(int target:{150,30}){CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;app.stack.regular=true;
+  app.nested=[&]{assert(app.stack.position==0);app.SeekTime(target);};
+  app.SeekTime(120);
+  const int part=target/100;
+  assert(old->seeks==0&&app.stack.position==part&&app.player.HasPendingOpen()&&app.stackPlays==2);
+  assert(app.player.m_nextItem.pItem->id==100+part&&app.player.m_nextItem.pItem->startOffset==uint64_t(target%100*1000));
+  assert(app.m_stackPartOpen.intent==0);
+  old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==100+part);
+ }
+ // a failed open of another part leaves the stack at the playing part
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;app.stack.regular=true;app.abandon=true;
+  app.SeekTime(120);
+  assert(app.stack.position==0&&!app.player.HasPendingOpen()&&app.m_stackPartOpen.intent==0);
+  app.abandon=false;app.SeekTime(50);assert(old->seeks==1);
+ }
+ // the end of a part: a seek during the open of the next part opens the part of
+ // the seek
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
+  old->m_type="remote";old->playing=true;app.stack.regular=app.stack.next=true;
+  app.nested=[&]{assert(app.stack.position==0);app.SeekTime(130);};
+  app.Ended();
+  assert(app.stack.position==1&&app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==101);
+  assert(app.player.m_nextItem.pItem->startOffset==30000&&app.m_stackPartOpen.intent==0);
+ }
  // a seek into the part that waits for the close of the previous part
  {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;
@@ -1000,7 +1031,8 @@ def main():
         'void CPlayListPlayer::SetCurrentPlaylist(')))
     wrapper = function(application, 'bool CApplication::PlayFile(')
     code = code.replace('@PLAYFILE@', wrapper[wrapper.index('{') + 1:wrapper.rindex('}')])
-    code = code.replace('@ENDOPEN@', function(application, 'void CApplication::EndOpen('))
+    code = code.replace('@ENDOPEN@', function(application, 'void CApplication::EndOpen(') +
+                        function(application, 'bool CApplication::PlayStackPart('))
     play = function(application, 'bool CApplication::StartPlayback(')
     intent = play.index('  if (!bRestart)\n  {')
     code = code.replace('@INTENT@', play[intent:play.index('\n  }\n', intent) + 4])
@@ -1101,11 +1133,9 @@ int main(){""", 1)
                         'bool CanSeek()const{if(canSeekHook){auto hook=std::move(canSeekHook);hook();}return true;}'
                         'void SeekTime(int64_t);void SeekTimeRelative(int64_t);bool SeekWaitingItem(int64_t,bool);'
                         'int64_t GetTime()const{return 0;}std::shared_ptr<IPlayer> GetControllable();', 1)
-    base = base.replace('struct CApplicationStackHelper {', 'struct CApplicationStackHelper {int position=0;'
+    base = base.replace('struct CApplicationStackHelper {', 'struct CApplicationStackHelper {'
                         'int GetStackPartNumberAtTimeMs(uint64_t t){return t>=100000?1:0;}'
-                        'uint64_t GetStackPartStartTimeMs(int part){return part*100000;}'
-                        'int GetCurrentPartNumber(){return position;}void SetStackPartCurrentFileItem(int p){position=p;}'
-                        'CFileItem GetCurrentStackPartFileItem(){CFileItem item;item.id=100+position;return item;}', 1)
+                        'uint64_t GetStackPartStartTimeMs(int part){return part*100000;}', 1)
     assert 'struct Messenger {void PostMsg(int){}};' in base
     base = base.replace('struct Messenger {void PostMsg(int){}};', 'constexpr int TMSG_MEDIA_PLAY=8,TMSG_MEDIA_SEEK_STACK_TIME=9;\n'
                         'struct CApplication;\n'

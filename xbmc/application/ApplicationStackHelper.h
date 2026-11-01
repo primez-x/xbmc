@@ -67,14 +67,6 @@ public:
   bool HasNextStackPartFileItem() const;
 
   /*!
-  \brief sets the next stack part as the current and returns a reference to it
-  */
-  const CFileItem& SetNextStackPartCurrentFileItem()
-  {
-    return GetStackPartFileItem(++m_currentStackPosition);
-  }
-
-  /*!
   \brief sets a given stack part as the current and returns a reference to it
   \param partNumber the number of the part that needs to become the current one
   */
@@ -82,6 +74,12 @@ public:
   {
     return GetStackPartFileItem(m_currentStackPosition = partNumber);
   }
+
+  /*!
+  \brief Returns a FileItem part of a (non-ISO) stack playback
+  \param partNumber the requested part number in the stack
+  */
+  const CFileItem& GetStackPartFileItem(int partNumber) const;
 
   /*!
   \brief Returns the FileItem currently playing back as part of a (non-ISO) stack playback
@@ -191,7 +189,6 @@ protected:
   \param partNumber the requested part number in the stack
   */
   CFileItem& GetStackPartFileItem(int partNumber);
-  const CFileItem& GetStackPartFileItem(int partNumber) const;
 
   class StackPartInformation
   {
