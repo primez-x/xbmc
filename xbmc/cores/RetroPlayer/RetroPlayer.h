@@ -16,6 +16,7 @@
 #include "guilib/DispResource.h"
 #include "threads/CriticalSection.h"
 
+#include <atomic>
 #include <memory>
 
 namespace KODI
@@ -160,8 +161,9 @@ private:
   };
   CCriticalSection m_itemMutex;
   ItemState m_itemState = ItemState::NONE;
-  // The close reports the end only of a started game
-  bool m_started = false;
+  // The close reports the end only of a started game. Controls from other
+  // threads (JSON-RPC) read the state.
+  std::atomic<bool> m_started{false};
 };
 } // namespace RETRO
 } // namespace KODI

@@ -52,7 +52,6 @@
 
 #include <memory>
 #include <mutex>
-#include <utility>
 
 using namespace KODI;
 using namespace GAME;
@@ -290,7 +289,7 @@ void CRetroPlayer::CloseItem()
   CLog::Log(LOGDEBUG, "RetroPlayer[PLAYER]: Closing file");
 
   // Only a started game has a game to save and an end to report
-  const bool started = std::exchange(m_started, false);
+  const bool started = m_started.exchange(false);
 
   m_autoSave.reset();
 
@@ -309,7 +308,9 @@ void CRetroPlayer::CloseItem()
       CLog::Log(LOGDEBUG, "RetroPlayer[SAVE]: Failed to save state at close");
   }
 
-  m_playback.reset();
+  // The player keeps a playback without a game: a query of the player after a
+  // failed or closed open, also from a caller that holds the player, needs one.
+  ResetPlayback();
 
   if (m_input)
     m_input->StopAgentManager();
@@ -463,6 +464,11 @@ uint64_t CRetroPlayer::GetTotalTime()
 
 void CRetroPlayer::SetSpeed(float speed)
 {
+  // Only a started game has a speed: a failed, cancelled or closed open has no
+  // streams, and an open in progress has no game yet.
+  if (!m_started)
+    return;
+
   if (m_playback->GetSpeed() != static_cast<double>(speed))
   {
     if (speed == 1.0f)
@@ -495,7 +501,7 @@ bool CRetroPlayer::OnAction(const CAction& action)
   {
     case ACTION_PLAYER_RESET:
     {
-      if (m_gameClient)
+      if (m_started)
       {
         float speed = static_cast<float>(m_playback->GetSpeed());
 
