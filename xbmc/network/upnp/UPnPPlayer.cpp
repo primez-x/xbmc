@@ -480,6 +480,9 @@ bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
   XbmcThreads::EndTime<> timeout(10s);
   const uint64_t open = m_openSequence;
 
+  // the renderer disappeared before the creation of the player
+  NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);
+
   /* if no path we want to attach to a already playing player */
   if (file.GetPath() == "")
   {
@@ -585,7 +588,13 @@ bool CUPnPPlayer::CloseFile(bool reopen)
 {
   // stops an OpenFile that waits for the renderer
   CancelOpen();
-  NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);
+  // a player without a renderer opened nothing: the close completes, and the
+  // application opens a newer item
+  if (!m_delegate)
+  {
+    CServiceBroker::GetDataCacheCore().Reset();
+    return true;
+  }
   {
     std::unique_lock<CCriticalSection> lock(m_itemSection);
     // the close ends the item: the player sends no more controls, and the worker
@@ -627,10 +636,6 @@ bool CUPnPPlayer::CloseFile(bool reopen)
   StopThread(true);
   CServiceBroker::GetDataCacheCore().Reset();
   return true;
-failed:
-  m_logger->error("CloseFile - unable to stop playback");
-  CServiceBroker::GetDataCacheCore().Reset();
-  return false;
 }
 
 void CUPnPPlayer::Pause()

@@ -1128,7 +1128,26 @@ void item_section() {
   Close(*p);
 }
 
-#define CASES(X) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
+// A renderer can disappear before the creation of the player: the player has no
+// renderer. The open fails, also the attach to a playing renderer, and the close
+// completes at once, so a newer item and a shutdown do not wait for the player.
+void missing_renderer() {
+  for (const char* path : {"http://server/a.mkv", ""}) {
+    Begin("a player without a renderer");
+    IPlayerCallback cb;
+    {
+      CUPnPPlayer p(cb, "P");
+      CUPnP::UnregisterUserdata(p.m_delegate.get());
+      p.m_delegate.reset();
+      CHECK(!p.OpenFile(Item(path), CPlayerOptions()));
+      CHECK(Close(p) == 1);
+      ExpectLog({});
+    }
+    CHECK(cb.started == 0 && cb.stopped == 0 && cb.ended == 0);
+  }
+}
+
+#define CASES(X) X(missing_renderer) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
   X(close_inside_wait_renderer_playing) X(newer_player_on_same_renderer) X(refused_stop) \
   X(unanswered_stop) X(one_end_notification) X(destroy_during_close) X(transitioning_renderer) \
   X(abandoned_command) X(failed_send) X(close_unanswered_wait) X(close_during_last_command) \
@@ -1154,6 +1173,11 @@ int main(int argc, char** argv) {
 # Each control removes one new check from the production text. A rig that still
 # passes would not prove the check.
 CONTROLS = [
+    ('a close without a renderer never completes',
+     '  if (!m_delegate)\n  {\n    CServiceBroker::GetDataCacheCore().Reset();\n    return true;\n  }\n',
+     '  if (!m_delegate)\n    return false;\n'),
+    ('the open without a renderer uses the renderer',
+     '  // the renderer disappeared before the creation of the player\n  NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);\n', ''),
     ('wait does not check the open sequence',
      'if (open != m_openSequence)\n  {\n    m_logger->debug', 'if (false)\n  {\n    m_logger->debug'),
     ('Play does not mark the renderer as started',
@@ -1161,7 +1185,7 @@ CONTROLS = [
     ('OpenFile does not check the open sequence before starting',
      'if (open != m_openSequence)\n      goto failed;', 'if (false)\n      goto failed;'),
     ('CloseFile does not end the open',
-     '  CancelOpen();\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
+     '  CancelOpen();\n  // a player without a renderer', '  // a player without a renderer'),
     ('a close does not end the waits of the open',
      '    command->m_event.Set();\n', '    (void)command;\n'),
     ('all commands share one answer',
@@ -1301,7 +1325,9 @@ def run(code, expect_failure=False, label=''):
             result = subprocess.run([str(out / 'test'), name], capture_output=True, text=True,
                                     timeout=20)
             if result.returncode != 0:
-                assert 'Assertion' in result.stderr, result.stderr
+                # a check of the case or a sanitizer report
+                assert any(sign in result.stderr for sign in ('Assertion', 'runtime error:', 'AddressSanitizer')), \
+                    result.stderr
                 failures[name] = result.stderr.strip().splitlines()[-1]
         if expect_failure:
             assert failures, 'negative control passed: ' + label
