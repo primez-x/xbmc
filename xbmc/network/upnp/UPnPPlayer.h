@@ -65,8 +65,9 @@ private:
   // Ends an open in progress; the waits of the open end
   void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
-  // Sends a control of the item; the caller holds m_itemSection
-  int SendControl(const std::function<int(void* userdata)>& send);
+  // Sends a command that changes the renderer; the close stops the renderer
+  // after the answer. Returns no command when the controller did not send the command.
+  std::shared_ptr<CUPnPCommand> SendCommand(const std::function<int(void* userdata)>& send);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -89,9 +90,9 @@ private:
   // close: the renderer gets no control after the Stop, and the application gets
   // no event of the item after the end of the item
   CCriticalSection m_itemSection;
-  // The sent controls and the end of the wait for the answers
-  std::vector<std::shared_ptr<CUPnPCommand>> m_controls;
-  XbmcThreads::EndTime<> m_controlTimeout;
+  // The sent commands that change the renderer, and the end of the wait for the answers
+  std::vector<std::shared_ptr<CUPnPCommand>> m_commands;
+  XbmcThreads::EndTime<> m_commandTimeout;
   // The Stop of the close and the end of the wait for the answer
   std::shared_ptr<CUPnPCommand> m_stop;
   XbmcThreads::EndTime<> m_stopTimeout;

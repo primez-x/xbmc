@@ -251,9 +251,9 @@ CUPnPPlayer::CUPnPPlayer(IPlayerCallback& callback, const char* uuid)
 CUPnPPlayer::~CUPnPPlayer()
 {
   {
-    // the destructor cannot wait for the answers of the controls: stop the renderer now
+    // the destructor cannot wait for the answers of the commands: stop the renderer now
     std::unique_lock<CCriticalSection> lock(m_itemSection);
-    m_controls.clear();
+    m_commands.clear();
   }
   CloseFile();
   // the close can wait for the renderer: the worker uses the members
@@ -296,16 +296,19 @@ int CUPnPPlayer::WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& time
   return NPT_SUCCESS;
 }
 
-int CUPnPPlayer::SendControl(const std::function<int(void* userdata)>& send)
+std::shared_ptr<CUPnPCommand> CUPnPPlayer::SendCommand(
+    const std::function<int(void* userdata)>& send)
 {
-  m_controls.erase(std::remove_if(m_controls.begin(), m_controls.end(),
+  std::unique_lock<CCriticalSection> lock(m_itemSection);
+  m_commands.erase(std::remove_if(m_commands.begin(), m_commands.end(),
                                   [](const auto& command) { return command->m_answered.load(); }),
-                   m_controls.end());
+                   m_commands.end());
   const auto command = NewCommand();
-  NPT_CHECK(Sent(*command, send(command.get())));
-  m_controls.emplace_back(command);
-  m_controlTimeout.Set(10s);
-  return NPT_SUCCESS;
+  if (NPT_FAILED(Sent(*command, send(command.get()))))
+    return {};
+  m_commands.emplace_back(command);
+  m_commandTimeout.Set(10s);
+  return command;
 }
 
 int CUPnPPlayer::PlayFile(const CFileItem& file,
@@ -375,32 +378,32 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
   if (stopFirst)
   {
     timeout.Set(timeout.GetInitialTimeoutValue());
-    const auto stop = NewCommand();
-    NPT_CHECK_LABEL_SEVERE(
-        Sent(*stop, m_control->Stop(m_delegate->m_device, m_delegate->m_instance, stop.get())),
-        failed_stop);
+    const auto stop = SendCommand([this](void* command) {
+      return m_control->Stop(m_delegate->m_device, m_delegate->m_instance, command);
+    });
+    NPT_CHECK_POINTER_LABEL_SEVERE(stop, failed_stop);
     NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*stop, timeout, open), failed_stop);
     NPT_CHECK_LABEL_SEVERE(stop->m_status, failed_stop);
   }
 
   timeout.Set(timeout.GetInitialTimeoutValue());
   {
-    const auto uri = NewCommand();
-    NPT_CHECK_LABEL_SEVERE(Sent(*uri, m_control->SetAVTransportURI(
-                                                m_delegate->m_device, m_delegate->m_instance,
-                                                obj->m_Resources[res_index].m_Uri,
-                                                (const char*)tmp, uri.get())),
-                           failed_setavtransporturi);
+    const auto uri = SendCommand([&](void* command) {
+      return m_control->SetAVTransportURI(m_delegate->m_device, m_delegate->m_instance,
+                                          obj->m_Resources[res_index].m_Uri, (const char*)tmp,
+                                          command);
+    });
+    NPT_CHECK_POINTER_LABEL_SEVERE(uri, failed_setavtransporturi);
     NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*uri, timeout, open), failed_setavtransporturi);
     NPT_CHECK_LABEL_SEVERE(uri->m_status, failed_setavtransporturi);
   }
 
   timeout.Set(timeout.GetInitialTimeoutValue());
   {
-    const auto play = NewCommand();
-    NPT_CHECK_LABEL_SEVERE(
-        Sent(*play, m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", play.get())),
-        failed_play);
+    const auto play = SendCommand([this](void* command) {
+      return m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", command);
+    });
+    NPT_CHECK_POINTER_LABEL_SEVERE(play, failed_play);
     // the renderer plays for this player now, CloseFile must stop the renderer
     m_stopremote = true;
     NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*play, timeout, open), failed_play);
@@ -434,13 +437,12 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
   if (options.starttime > 0)
   {
     /* many upnp units won't load file properly until after play (including xbmc) */
-    std::unique_lock<CCriticalSection> lock(m_itemSection);
-    NPT_CHECK_LABEL(SendControl([&](void* command) {
-                      return m_control->Seek(
-                          m_delegate->m_device, m_delegate->m_instance, "REL_TIME",
-                          PLT_Didl::FormatTimeStamp((NPT_UInt32)options.starttime), command);
-                    }),
-                    failed_seek);
+    if (!SendCommand([&](void* command) {
+          return m_control->Seek(m_delegate->m_device, m_delegate->m_instance, "REL_TIME",
+                                 PLT_Didl::FormatTimeStamp((NPT_UInt32)options.starttime),
+                                 command);
+        }))
+      goto failed_seek;
   }
 
   return NPT_SUCCESS;
@@ -590,17 +592,18 @@ bool CUPnPPlayer::CloseFile(bool reopen)
     // no longer reports the end of the item
     if (m_started.exchange(false))
       m_callback.OnPlayBackStopped();
-    // The renderer can receive the commands in any order. A control that arrives
-    // after the Stop starts the renderer again, or reaches the item of a newer
-    // player: stop the renderer after the answers of the sent controls.
+    // The renderer can receive the commands in any order. A command of the open
+    // or a control that arrives after the Stop starts the renderer again, or
+    // reaches the item of a newer player: stop the renderer after the answers of
+    // the sent commands.
     const auto answered = [](const auto& command) { return command->m_answered.load(); };
-    if (!std::all_of(m_controls.begin(), m_controls.end(), answered))
+    if (!std::all_of(m_commands.begin(), m_commands.end(), answered))
     {
-      if (!m_controlTimeout.IsTimePast())
+      if (!m_commandTimeout.IsTimePast())
         return false;
-      m_logger->error("CloseFile - the renderer did not answer a control");
+      m_logger->error("CloseFile - the renderer did not answer a command");
     }
-    m_controls.clear();
+    m_commands.clear();
   }
   // Stop the renderer once, without a wait: the application calls CloseFile each
   // frame until the close completes, and a newer player uses the renderer after
@@ -638,21 +641,19 @@ void CUPnPPlayer::Pause()
     return;
   if (IsPaused())
   {
-    NPT_CHECK_LABEL(SendControl([this](void* command) {
-                      return m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1",
-                                             command);
-                    }),
-                    failed);
+    if (!SendCommand([this](void* command) {
+          return m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", command);
+        }))
+      goto failed;
     CDataCacheCore::GetInstance().SetSpeed(1.0, 1.0);
     m_callback.OnPlayBackResumed();
   }
   else
   {
-    NPT_CHECK_LABEL(SendControl([this](void* command) {
-                      return m_control->Pause(m_delegate->m_device, m_delegate->m_instance,
-                                              command);
-                    }),
-                    failed);
+    if (!SendCommand([this](void* command) {
+          return m_control->Pause(m_delegate->m_device, m_delegate->m_instance, command);
+        }))
+      goto failed;
     CDataCacheCore::GetInstance().SetSpeed(1.0, 0.0);
     m_callback.OnPlayBackPaused();
   }
@@ -667,13 +668,11 @@ void CUPnPPlayer::SeekTime(int64_t ms)
   std::unique_lock<CCriticalSection> lock(m_itemSection);
   if (!m_started)
     return;
-  NPT_CHECK_LABEL(SendControl([&](void* command) {
-                    return m_control->Seek(m_delegate->m_device, m_delegate->m_instance,
-                                           "REL_TIME",
-                                           PLT_Didl::FormatTimeStamp((NPT_UInt32)(ms / 1000)),
-                                           command);
-                  }),
-                  failed);
+  if (!SendCommand([&](void* command) {
+        return m_control->Seek(m_delegate->m_device, m_delegate->m_instance, "REL_TIME",
+                               PLT_Didl::FormatTimeStamp((NPT_UInt32)(ms / 1000)), command);
+      }))
+    goto failed;
 
   CDataCacheCore::GetInstance().SeekFinished(0);
   return;
@@ -780,11 +779,11 @@ void CUPnPPlayer::SetVolume(float volume)
     if (!m_started)
       return;
     NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);
-    NPT_CHECK_LABEL(SendControl([&](void* command) {
-                      return m_control->SetVolume(m_delegate->m_device, m_delegate->m_instance,
-                                                  "Master", (int)(volume * 100), command);
-                    }),
-                    failed);
+    if (!SendCommand([&](void* command) {
+          return m_control->SetVolume(m_delegate->m_device, m_delegate->m_instance, "Master",
+                                      (int)(volume * 100), command);
+        }))
+      goto failed;
   }
   return;
 failed:
@@ -832,11 +831,10 @@ void CUPnPPlayer::SetSpeed(float speed)
     return;
   if (IsPaused() && speed == 1.0f)
   {
-    NPT_CHECK_LABEL(SendControl([this](void* command) {
-                      return m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1",
-                                             command);
-                    }),
-                    failed);
+    if (!SendCommand([this](void* command) {
+          return m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", command);
+        }))
+      goto failed;
     m_callback.OnPlayBackResumed();
     CDataCacheCore::GetInstance().SetSpeed(1.0, 1.0);
   }

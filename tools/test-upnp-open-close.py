@@ -52,7 +52,6 @@ typedef unsigned NPT_Cardinal;
 #define NPT_SUCCEEDED(r) ((r) == NPT_SUCCESS)
 #define NPT_CHECK_LABEL(x, l) do { NPT_Result r_ = (x); if (r_ != NPT_SUCCESS) goto l; } while (0)
 #define NPT_CHECK_LABEL_SEVERE(x, l) NPT_CHECK_LABEL(x, l)
-#define NPT_CHECK(x) do { NPT_Result r_ = (x); if (r_ != NPT_SUCCESS) return r_; } while (0)
 #define NPT_CHECK_POINTER_LABEL_SEVERE(p, l) do { if (!(p)) goto l; } while (0)
 #define NPT_SET_LOCAL_LOGGER(x)
 
@@ -433,7 +432,7 @@ public:
                uint64_t open);
   void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
-  int SendControl(const std::function<int(void* userdata)>& send);
+  std::shared_ptr<CUPnPCommand> SendCommand(const std::function<int(void* userdata)>& send);
   void Pause();
   void SeekTime(int64_t ms);
   void SetSpeed(float speed);
@@ -457,8 +456,8 @@ public:
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting;
   CCriticalSection m_itemSection;
-  std::vector<std::shared_ptr<CUPnPCommand>> m_controls;
-  XbmcThreads::EndTime<> m_controlTimeout;
+  std::vector<std::shared_ptr<CUPnPCommand>> m_commands;
+  XbmcThreads::EndTime<> m_commandTimeout;
   std::shared_ptr<CUPnPCommand> m_stop;
   XbmcThreads::EndTime<> m_stopTimeout;
   bool m_hasVideo{false};
@@ -619,7 +618,7 @@ void close_inside_wait() {
         if (w != int(n))
           return;
         g_waitHook = nullptr;
-        CHECK(p.CloseFile() == (n < 3));
+        CHECK(p.CloseFile() == (n < 2));  // the close waits for the answer of the URI and of Play
       };
       CHECK(!p.OpenFile(Item(), CPlayerOptions()));
       CHECK(cb.Total() == 0 && p.creates == 0 && !p.running);
@@ -702,8 +701,8 @@ void refused_stop() {
   }
   CHECK(Count("P:Stop") == 1);
 
-  // The answer of Play arrives during the close, and the renderer refuses the
-  // Stop later: the answer of Play is not the answer of Stop.
+  // The answer of Play arrives during the close: the close sends the Stop after
+  // the answer, the renderer refuses the Stop, and the close completes once.
   Begin("late answer of Play during the stop of a close");
   {
     CUPnPPlayer p(cb, "P");
@@ -716,8 +715,10 @@ void refused_stop() {
       CHECK(!p.CloseFile());
     };
     CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(Count("P:Stop") == 0);
     DeliverPending();  // the answer of Play
-    CHECK(!p.CloseFile());
+    CHECK(!p.CloseFile() && Count("P:Stop") == 1);
+    DeliverPending();
     DeliverPending();  // the answer of Stop
     CHECK(p.CloseFile());
   }
@@ -817,14 +818,14 @@ void abandoned_command() {
     g_waitHook = nullptr;
     g_ctl.pending.back().delay = 2;
     abandoned = g_ctl.pending.back().userdata;
-    CHECK(p.CloseFile());
+    CHECK(!p.CloseFile());  // the close waits for the answer
   };
   CHECK(!p.OpenFile(Item(), CPlayerOptions()));
   CHECK(abandoned && Registered(abandoned));
   CHECK(!g_ctl.pending.empty());  // the answer has yet to arrive
   while (!g_ctl.pending.empty())
     DeliverPending();
-  CHECK(Registered(abandoned));
+  CHECK(Registered(abandoned) && p.CloseFile());
   // a newer command frees the answered command
   CUPnPPlayer q(cb, "Q");
   CHECK(q.OpenFile(Item(), CPlayerOptions()));
@@ -1006,6 +1007,45 @@ void control_before_close() {
   CHECK(cbA.events == "SARPT");
 }
 
+// The commands of an open change the renderer too: a close during the open
+// completes after the answers of the sent commands. A late Play would start the
+// renderer after the Stop of the close; a late Stop or URI would reach the item
+// of the newer player. After the close starts, each command goes out with only
+// the answer of that command to come.
+void open_commands_before_close() {
+  const std::vector<std::string> flow = {"GetTransportInfo", "Stop", "SetAVTransportURI", "Play"};
+  for (size_t n = 2; n <= 4; ++n) {
+    Begin("delayed answer of " + flow[n - 1] + ", close and newer player");
+    IPlayerCallback cbA, cbB;
+    auto a = std::make_unique<CUPnPPlayer>(cbA, "A");
+    auto b = std::make_unique<CUPnPPlayer>(cbB, "B");
+    a->m_delegate->firstState = "PLAYING";
+    void* delayed = nullptr;
+    bool closing = false;
+    g_ctl.cmdHook = [&](const std::string& c) {
+      if (closing)
+        CHECK(std::none_of(g_ctl.pending.begin(), g_ctl.pending.end(),
+                           [&](const auto& e) { return e.userdata == delayed; }));
+      else if (c == "A:" + flow[n - 1] && !delayed) {
+        g_ctl.pending.back().delay = 3;
+        delayed = g_ctl.pending.back().userdata;
+      }
+    };
+    g_waitHook = [&](int w) {
+      if (w != int(n))
+        return;
+      g_waitHook = nullptr;
+      closing = true;
+      Close(*a);
+      CHECK(b->OpenFile(Item(), CPlayerOptions()));
+    };
+    CHECK(!a->OpenFile(Item(), CPlayerOptions()));
+    g_ctl.cmdHook = nullptr;
+    CHECK(delayed && cbA.Total() == 0 && cbB.started == 1);
+    CHECK(Count("A:Stop") == (n >= 4 ? 2 : 1));
+  }
+}
+
 // A renderer that never answers a control does not keep the close: the close
 // stops the renderer at the deadline of the control. The destructor cannot wait,
 // and stops the renderer at once.
@@ -1092,7 +1132,8 @@ void item_section() {
   X(close_inside_wait_renderer_playing) X(newer_player_on_same_renderer) X(refused_stop) \
   X(unanswered_stop) X(one_end_notification) X(destroy_during_close) X(transitioning_renderer) \
   X(abandoned_command) X(failed_send) X(close_unanswered_wait) X(close_during_last_command) \
-  X(attach) X(control_after_close) X(control_before_close) X(unanswered_control) X(item_section)
+  X(attach) X(control_after_close) X(control_before_close) X(open_commands_before_close) \
+  X(unanswered_control) X(item_section)
 int main(int argc, char** argv) {
 #define ENTRY(name) {#name, name},
   const std::vector<std::pair<const char*, void (*)()>> cases = {CASES(ENTRY)};
@@ -1154,18 +1195,21 @@ CONTROLS = [
     ('a pause after the close reaches the renderer',
      '  if (!m_started)\n    return;\n  if (IsPaused())\n', '  if (IsPaused())\n'),
     ('a seek after the close reaches the renderer',
-     '  if (!m_started)\n    return;\n  NPT_CHECK_LABEL(SendControl', '  NPT_CHECK_LABEL(SendControl'),
+     '  if (!m_started)\n    return;\n  if (!SendCommand(', '  if (!SendCommand('),
     ('a volume change after the close reaches the renderer',
      '    if (!m_started)\n      return;\n    NPT_CHECK_POINTER_LABEL_SEVERE', '    NPT_CHECK_POINTER_LABEL_SEVERE'),
-    ('the close stops the renderer before the answers of the controls',
-     '      if (!m_controlTimeout.IsTimePast())\n        return false;\n', ''),
-    ('the close waits for an unanswered control without a deadline',
-     'if (!m_controlTimeout.IsTimePast())', 'if (true)'),
-    ('the close does not wait for a control',
-     '  m_controls.emplace_back(command);\n', ''),
-    ('a control has no deadline', '  m_controlTimeout.Set(10s);\n', ''),
-    ('the destructor waits for the controls',
-     '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    m_controls.clear();\n  }\n  CloseFile();',
+    ('the close stops the renderer before the answers of the commands',
+     '      if (!m_commandTimeout.IsTimePast())\n        return false;\n', ''),
+    ('the close waits for an unanswered command without a deadline',
+     'if (!m_commandTimeout.IsTimePast())', 'if (true)'),
+    ('the close does not wait for a command',
+     '  m_commands.emplace_back(command);\n', ''),
+    ('a command has no deadline', '  m_commandTimeout.Set(10s);\n', ''),
+    ('the open sends Play without the close waiting for the answer',
+     '    const auto play = SendCommand([this](void* command) {\n      return m_control->Play(',
+     '    const auto play = NewCommand();\n    Sent(*play, m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", play.get()));\n    if (false) SendCommand([this](void* command) {\n      return m_control->Play('),
+    ('the destructor waits for the commands',
+     '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    m_commands.clear();\n  }\n  CloseFile();',
      '  }\n  CloseFile();'),
     ('the close ends the item outside the item section',
      '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    // the close ends the item', '    // the close ends the item'),
@@ -1193,7 +1237,7 @@ def production():
     command = source[command:source.index('\n};\n', command) + 4]
     command += function(source, 'static std::shared_ptr<CUPnPCommand> NewCommand()')
     command += function(source, 'static NPT_Result Sent(')
-    signatures = ['void CUPnPPlayer::CancelOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::SendControl(',
+    signatures = ['void CUPnPPlayer::CancelOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'std::shared_ptr<CUPnPCommand> CUPnPPlayer::SendCommand(',
                   'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(', 'bool CUPnPPlayer::CloseFile(',
                   'CUPnPPlayer::~CUPnPPlayer()', 'void CUPnPPlayer::Pause()', 'void CUPnPPlayer::SeekTime(',
                   'void CUPnPPlayer::SetSpeed(', 'void CUPnPPlayer::SetVolume(', 'bool CUPnPPlayer::IsPaused() const',
