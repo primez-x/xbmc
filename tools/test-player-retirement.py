@@ -87,14 +87,14 @@ struct CApplicationPlayer {
 '''
 # A control of a stopped item resumes, pauses or seeks the item.
 CONTROLS_PLAYER = '''
-  int controls=0;
+  int controls=0;double startTime=-1;
   void Pause(){++controls;}void Seek(bool,bool,bool){++controls;}void SeekPercentage(float){++controls;}
   int SeekChapter(int){++controls;return 0;}bool SeekScene(bool){++controls;return true;}
   void SeekTime(int64_t){++controls;}bool SeekTimeRelative(int64_t){++controls;return true;}
   void SetSpeed(float){++controls;}void SetTempo(float){++controls;}void FrameAdvance(int){++controls;}
   void SetMute(bool){++controls;}void SetVolume(float){++controls;}bool OnAction(const CAction&){++controls;return true;}'''
 CONTROLS_ROUTER = '''
-  std::shared_ptr<IPlayer> GetControllable();
+  std::shared_ptr<IPlayer> GetControllable();bool SeekWaitingItem(int64_t,bool);
   bool IsPlaying()const;bool IsPlayingAudio()const{return false;}mutable std::function<void()> queryHook;
   bool IsPlayingVideo()const{if(queryHook){auto hook=std::move(queryHook);hook();}return IsPlaying();}
   int64_t GetTime()const{return 0;}
@@ -145,6 +145,23 @@ static void speed_after_replacement(){
   auto current=app.GetInternal();
   assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1);
 }
+// A newer item that waits for the close of the old player takes the time of an
+// absolute or relative seek: the item opens at the time. The other seeks need
+// the opened item.
+static void seek_waiting_item(){
+  CPlayerOptions options;options.starttime=20;CPlayerCoreFactory factory;IPlayerCallback callback;
+  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+  app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
+  CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
+  app.SeekTime(50000);assert(app.m_nextItem.options.starttime==50);
+  app.SeekTimeRelative(-10000);assert(app.m_nextItem.options.starttime==40);
+  app.SeekTimeRelative(-60000);assert(app.m_nextItem.options.starttime==0);
+  app.SeekTime(30000);app.SeekTimeRelative(5000);
+  assert(old->controls==0);
+  old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->lastItem==2&&current->startTime==35&&current->controls==0);
+}
 // A stopped player that closes is not playing. A newer open that waits for the
 // close continues the playback, like an open in progress.
 static void state_during_close(){
@@ -171,6 +188,7 @@ int main(){
   state_during_close();
   controls_during_close();
   speed_after_replacement();
+  seek_waiting_item();
   shutdown_cases();
   discarded_notifications();
   CFileItem file;file.id=1;CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
@@ -265,9 +283,13 @@ def main():
         'void CApplicationPlayer::SetTempo(', 'void CApplicationPlayer::FrameAdvance(',
         'void CApplicationPlayer::SetMute(', 'void CApplicationPlayer::SetVolume(',
         'bool CApplicationPlayer::OnAction(', 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()',
+        'bool CApplicationPlayer::SeekWaitingItem(',
         'bool CApplicationPlayer::IsPlaying() const']) + TESTS
     # The playback controls of the router and the players; other harnesses share the prelude.
     for anchor, stubs in (('struct IPlayer {', 'struct CAction {int GetID()const{return 0;}};\nstruct IPlayer {' + CONTROLS_PLAYER),
+                          ('struct CPlayerOptions {};', 'struct CPlayerOptions {double starttime=0;};'),
+                          ('  bool OpenFile(const CFileItem& file,const CPlayerOptions&){\n    ++opens;',
+                           '  bool OpenFile(const CFileItem& file,const CPlayerOptions& o){\n    ++opens;startTime=o.starttime;'),
                           ('  bool HasPlayer() {return bool(GetInternal());}', '  bool HasPlayer() {return bool(GetInternal());}' + CONTROLS_ROUTER)):
         assert code.count(anchor) == 1, anchor
         code = code.replace(anchor, stubs, 1)

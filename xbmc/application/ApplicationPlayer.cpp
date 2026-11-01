@@ -477,8 +477,22 @@ bool CApplicationPlayer::SeekScene(bool bPlus)
   return (player && player->SeekScene(bPlus));
 }
 
+bool CApplicationPlayer::SeekWaitingItem(int64_t time, bool relative)
+{
+  // A newer item that waits for the close of the old player opens at the time
+  // of the seek. The other seeks need the opened item.
+  std::unique_lock<CCriticalSection> lock(m_playerLock);
+  if (!m_nextItem.pItem)
+    return false;
+  double& start = m_nextItem.options.starttime;
+  start = std::max(0.0, (relative ? start : 0.0) + time / 1000.0);
+  return true;
+}
+
 void CApplicationPlayer::SeekTime(int64_t iTime)
 {
+  if (SeekWaitingItem(iTime, false))
+    return;
   std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SeekTime(iTime);
@@ -486,6 +500,8 @@ void CApplicationPlayer::SeekTime(int64_t iTime)
 
 void CApplicationPlayer::SeekTimeRelative(int64_t iTime)
 {
+  if (SeekWaitingItem(iTime, true))
+    return;
   std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
   {

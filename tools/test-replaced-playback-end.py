@@ -857,53 +857,50 @@ def compile_run(code, label):
                         str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         subprocess.run([str(out / 'test')], check=True, timeout=15)
 
-# The seeks of a stack run on the main thread, in the order of the requests and
-# in order with a stop: a seek after the stop, or a seek on another thread that
-# the stop overtakes, changes no stack and restarts nothing. Without a stop, the
-# main thread opens the part of the last seek. A seek into a part whose open
-# waits for the close of the previous part opens the part at the new time.
+# The seeks of a stack run on the main thread, and the caller waits: the later
+# controls of the caller follow the seek. A seek after the stop, or a seek that
+# a stop on the main thread overtakes, changes no stack and restarts nothing. A
+# seek into a part whose open waits for the close of the previous part sets the
+# start of the waiting open.
 SEEK = r"""
  auto& messenger=CServiceBroker::messenger;
- const auto run=[&](CApplication& app){auto seeks=std::move(messenger.seeks);messenger.seeks.clear();
-  for(auto ms:seeks)app.SeekStackTime(ms);};
- for(int order=0;order<2;++order){CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+ for(int order=0;order<2;++order){CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;
   if(order==0){app.StopPlaying();app.Stopped();assert(app.player.m_closingPlayer==old&&!app.player.IsPlaying());}
   // the seek of a script checks the playback, then the main thread stops first
   if(order==1)app.player.canSeekHook=[&]{app.StopPlaying();app.Stopped();};
   app.SeekTime(120);
-  assert(old->seeks==0&&app.stack.position==0&&!messenger.queued);
-  assert(messenger.seeks==(order==0?std::vector<int64_t>{}:std::vector<int64_t>{120000}));
-  run(app);
-  assert(app.stack.position==0&&!app.player.HasPendingOpen());
+  assert(old->seeks==0&&app.stack.position==0&&!messenger.queued&&messenger.posted.empty());
+  assert(messenger.sent==order&&!app.player.HasPendingOpen());
   old->canClose=true;app.Frame();
   assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen());
  }
- // a seek in the current part
- {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+ // a seek in the current part, then a relative seek of the same caller
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;
-  app.SeekTime(50);assert(old->seeks==0&&messenger.seeks.size()==1);
-  run(app);assert(old->seeks==1&&!app.player.HasPendingOpen());
+  app.SeekTime(50);app.player.SeekTimeRelative(-10000);
+  assert(messenger.sent==1&&messenger.posted.empty()&&!app.player.HasPendingOpen());
+  assert((old->seekLog==std::vector<std::string>{"abs50000","rel-10000"}));
  }
  // the newer seek wins: a seek into another part, then a seek into the current part
- {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;
   app.SeekTime(120);app.SeekTime(50);
-  assert(old->seeks==0&&messenger.seeks.size()==2);
-  run(app);
+  assert(old->seeks==0&&messenger.sent==2);
   assert(app.stack.position==0&&app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==100);
   assert(app.player.m_nextItem.pItem->startOffset==50000);
   old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==100);
  }
  // a seek into the part that waits for the close of the previous part
- {CApplication app;begin(app);reset();auto old=app.player.m_pPlayer;
+ {CApplication app;begin(app);reset();messenger={};messenger.main=&app;auto old=app.player.m_pPlayer;
   old->m_type="remote";old->playing=true;app.stack.regular=true;
-  app.SeekTime(120);run(app);
+  app.SeekTime(120);
   assert(app.stack.position==1&&app.player.HasPendingOpen()&&app.player.m_nextItem.pItem->id==101);
   assert(app.player.m_nextItem.pItem->startOffset==20000);
-  app.SeekTime(150);run(app);
-  assert(old->seeks==0&&app.player.m_nextItem.pItem->id==101&&app.player.m_nextItem.pItem->startOffset==50000);
+  app.SeekTime(150);app.player.SeekTimeRelative(-5000);
+  assert(old->seeks==0&&old->seekLog.empty()&&app.player.m_nextItem.pItem->id==101);
+  assert(app.player.m_nextItem.options.starttime==45);
   old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==101);
  }
@@ -1045,10 +1042,16 @@ static void QueueMusic(){
 int main(){""", 1)
     # The base program also runs the production stack seek.
     base = base.replace('struct CFileItem {', 'struct CFileItem {uint64_t startOffset=0;void SetStartOffset(uint64_t o){startOffset=o;}', 1)
-    base = base.replace('struct IPlayer {', 'struct IPlayer {int seeks=0;void SeekTime(int64_t){++seeks;}', 1)
+    base = base.replace('struct IPlayer {', 'struct IPlayer {int seeks=0;std::vector<std::string> seekLog;'
+                        'void SeekTime(int64_t t){++seeks;seekLog.push_back("abs"+std::to_string(t));}'
+                        'bool SeekTimeRelative(int64_t t){seekLog.push_back("rel"+std::to_string(t));return true;}', 1)
+    assert base.count('struct CPlayerOptions {bool fullscreen=false;};')==1
+    base = base.replace('struct CPlayerOptions {bool fullscreen=false;};',
+                        'struct CPlayerOptions {bool fullscreen=false;double starttime=0;};', 1)
     base = base.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {mutable std::function<void()> canSeekHook;'
                         'bool CanSeek()const{if(canSeekHook){auto hook=std::move(canSeekHook);hook();}return true;}'
-                        'void SeekTime(int64_t);std::shared_ptr<IPlayer> GetControllable();', 1)
+                        'void SeekTime(int64_t);void SeekTimeRelative(int64_t);bool SeekWaitingItem(int64_t,bool);'
+                        'int64_t GetTime()const{return 0;}std::shared_ptr<IPlayer> GetControllable();', 1)
     base = base.replace('struct CApplicationStackHelper {', 'struct CApplicationStackHelper {int position=0;'
                         'int GetStackPartNumberAtTimeMs(uint64_t t){return t>=100000?1:0;}'
                         'uint64_t GetStackPartStartTimeMs(int part){return part*100000;}'
@@ -1056,13 +1059,19 @@ int main(){""", 1)
                         'CFileItem GetCurrentStackPartFileItem(){CFileItem item;item.id=100+position;return item;}', 1)
     assert 'struct Messenger {void PostMsg(int){}};' in base
     base = base.replace('struct Messenger {void PostMsg(int){}};', 'constexpr int TMSG_MEDIA_PLAY=8,TMSG_MEDIA_SEEK_STACK_TIME=9;\n'
-                        'struct Messenger {void* queued=nullptr;std::vector<int64_t> seeks;void PostMsg(int){}'
-                        'void PostMsg(int,int,int,void* payload){queued=payload;}'
-                        'void PostMsg(int id,int64_t ms){assert(id==TMSG_MEDIA_SEEK_STACK_TIME);seeks.push_back(ms);}};', 1)
+                        'struct CApplication;\n'
+                        'struct Messenger {void* queued=nullptr;CApplication* main=nullptr;int sent=0;std::vector<int64_t> posted;'
+                        'void PostMsg(int){}void PostMsg(int,int,int,void* payload){queued=payload;}'
+                        'void PostMsg(int,int64_t ms){posted.push_back(ms);}int SendMsg(int id,int64_t ms);};', 1)
     base = base.replace('struct CApplication {', 'struct CApplication {void SeekTime(double);void SeekStackTime(int64_t);', 1)
+    # The main thread runs the message, and the caller waits for the seek.
+    base += ('int Messenger::SendMsg(int id,int64_t ms){assert(id==TMSG_MEDIA_SEEK_STACK_TIME);++sent;'
+             'main->SeekStackTime(ms);return 0;}\n')
     base = base.replace(' std::cout<<"PASS replaced playback end', SEEK + ' std::cout<<"PASS replaced playback end', 1)
     base += function(source, 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()')
+    base += function(source, 'bool CApplicationPlayer::SeekWaitingItem(')
     base += function(source, 'void CApplicationPlayer::SeekTime(')
+    base += function(source, 'void CApplicationPlayer::SeekTimeRelative(')
     base += function(application, 'void CApplication::SeekTime(')
     base += function(application, 'void CApplication::SeekStackTime(')
     # The playlist player runs the stack seek of the message on the main thread.

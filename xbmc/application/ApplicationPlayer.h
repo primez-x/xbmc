@@ -245,6 +245,8 @@ private:
   std::shared_ptr<const IPlayer> GetInternal() const;
   std::shared_ptr<IPlayer> GetInternal();
   std::shared_ptr<IPlayer> GetControllable();
+  // Sets the start of a newer item that waits for the close; false without one
+  bool SeekWaitingItem(int64_t time, bool relative);
   void CreatePlayer(const CPlayerCoreFactory &factory, const std::string &player, IPlayerCallback& callback);
   void ContinueClose();
 
