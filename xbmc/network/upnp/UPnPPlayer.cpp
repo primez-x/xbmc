@@ -456,6 +456,7 @@ bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
     Create();
 
   m_stopremote = true;
+  // after the last publish of the open: the item starts with that state, see Process
   m_started = true;
 
   if (file.IsVideo())
@@ -610,14 +611,14 @@ void CUPnPPlayer::Seek(bool bPlus, bool bLargeStep, bool bChapterOverride)
 
 void CUPnPPlayer::PublishTransportInfo(const CUPnPCommand& info)
 {
-  std::unique_lock<CCriticalSection> lock(m_pollSection);
+  std::unique_lock<CCriticalSection> lock(m_stateSection);
   m_delegate->SetTransportInfo(info.m_trainfo);
   ++m_stateEpoch;
 }
 
 void CUPnPPlayer::PollTransportInfo(bool send)
 {
-  std::unique_lock<CCriticalSection> lock(m_pollSection);
+  std::unique_lock<CCriticalSection> lock(m_stateSection);
   if (m_poll && m_poll->m_answered)
   {
     // the answer of a poll sent before the last state of an open is older
@@ -662,8 +663,15 @@ void CUPnPPlayer::Process()
         dataCacheCore.SetSpeed(1.0, 1.0);
       }
 
-      // an open of this player can end the item first, without an end notification
-      if (m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false))
+      // An open of this player can end the item first, without an end
+      // notification. The open publishes the state and starts the item under the
+      // state lock, so the state read and the claim of the item are one step.
+      bool ended;
+      {
+        std::unique_lock<CCriticalSection> lock(m_stateSection);
+        ended = m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false);
+      }
+      if (ended)
       {
         m_logger->info("Transport state flagged as STOPPED. Triggering OnPlayBackEnded.");
         m_callback.OnPlayBackEnded();

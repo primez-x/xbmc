@@ -86,7 +86,8 @@ private:
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting; // the commands that an open waits for
-  CCriticalSection m_pollSection;
+  // The published transport state, the poll and the epoch; the end claim of the worker
+  CCriticalSection m_stateSection;
   std::shared_ptr<CUPnPCommand> m_poll;
   uint64_t m_pollEpoch{0};
   uint64_t m_stateEpoch{0};

@@ -22,6 +22,8 @@ function = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['
 
 PRELUDE = r'''
 #include <algorithm>
+#include <condition_variable>
+#include <thread>
 #include <atomic>
 #include <cstdint>
 #include <chrono>
@@ -145,7 +147,7 @@ struct CDataCacheCore {
 struct CServiceBroker { static CDataCacheCore& GetDataCacheCore() { return CDataCacheCore::GetInstance(); } };
 
 void DeliverPending();
-struct CCriticalSection { void lock() {} void unlock() {} };
+struct CCriticalSection : std::recursive_mutex {};
 struct CEvent {
   bool signaled = false;
   void Set() { signaled = true; }
@@ -250,9 +252,22 @@ public:
   CUPnPPlayerController(PLT_MediaController* c, const char* n) : m_control(c), name(n) {
     m_device.owner = this;
   }
-  NPT_String GetTransportState() const { return m_trainfo.cur_transport_state; }
+  // Hooks of the thread case: after the worker reads the state, after an open
+  // publishes a state.
+  static inline std::function<void()> afterStateRead;
+  static inline std::function<void(const PLT_TransportInfo&)> afterPublish;
+  NPT_String GetTransportState() const {
+    NPT_String state = m_trainfo.cur_transport_state;
+    if (afterStateRead)
+      afterStateRead();
+    return state;
+  }
   NPT_String GetTransportStatus() const { return m_trainfo.cur_transport_status; }
-  void SetTransportInfo(const PLT_TransportInfo& info) { m_trainfo = info; }
+  void SetTransportInfo(const PLT_TransportInfo& info) {
+    m_trainfo = info;
+    if (afterPublish)
+      afterPublish(info);
+  }
   bool pollDue = false;  // the position poll finds the transport poll due
   bool UpdatePositionInfo() { return std::exchange(pollDue, false); }
   PLT_MediaController* m_control;
@@ -373,7 +388,7 @@ public:
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting;
-  CCriticalSection m_pollSection;
+  CCriticalSection m_stateSection;
   std::shared_ptr<CUPnPCommand> m_poll;
   uint64_t m_pollEpoch{0};
   uint64_t m_stateEpoch{0};
@@ -790,6 +805,62 @@ void close_unanswered_wait() {
   ExpectLog(want);
 }
 
+// The worker thread reads STOPPED during the reopen of Y and pauses before the
+// worker claims the end; Y then completes. The end of the replaced item X must
+// not take the started state of Y. Each wait is timed: the claim and the state
+// changes of the open can exclude each other, which ends a wait by the timeout.
+void worker_end_during_reopen() {
+  Begin("worker end claim during a reopen");
+  IPlayerCallback cb;
+  CUPnPPlayer p(cb, "P");
+  CHECK(p.OpenFile(Item("http://server/X.mkv"), CPlayerOptions()));
+  std::mutex gate;
+  std::condition_variable changed;
+  bool entered = false, stoppedPublished = false, stoppedRead = false, reopened = false;
+  const auto wait = [&](std::unique_lock<std::mutex>& lock, const bool& flag) {
+    changed.wait_for(lock, std::chrono::milliseconds(300), [&] { return flag; });
+  };
+  g_workerEntered = [&] {
+    std::unique_lock<std::mutex> lock(gate);
+    entered = true;
+    changed.notify_all();
+    wait(lock, stoppedPublished);
+  };
+  CUPnPPlayerController::afterStateRead = [&] {
+    std::unique_lock<std::mutex> lock(gate);
+    stoppedRead = true;
+    changed.notify_all();
+    wait(lock, reopened);
+  };
+  CUPnPPlayerController::afterPublish = [&](const PLT_TransportInfo& info) {
+    if (info.cur_transport_state != "STOPPED")
+      return;
+    std::unique_lock<std::mutex> lock(gate);
+    stoppedPublished = true;
+    changed.notify_all();
+    wait(lock, stoppedRead);
+  };
+  std::thread worker([&] { p.WorkerStep(); });
+  {
+    std::unique_lock<std::mutex> lock(gate);
+    wait(lock, entered);
+  }
+  // the renderer stopped X; the first answer of the reopen reports STOPPED
+  p.m_delegate->nextState = "STOPPED";
+  CHECK(p.OpenFile(Item("http://server/Y.mkv"), CPlayerOptions()));
+  {
+    std::unique_lock<std::mutex> lock(gate);
+    reopened = true;
+    changed.notify_all();
+  }
+  worker.join();
+  g_workerEntered = nullptr;
+  CUPnPPlayerController::afterStateRead = nullptr;
+  CUPnPPlayerController::afterPublish = nullptr;
+  CHECK(p.m_delegate->uri == "http://server/Y.mkv");
+  CHECK(p.m_started && cb.ended == 0);
+}
+
 void close_during_last_command() {
   // The last command of an open with a start time is Seek, without a wait after
   // the command: a close on another thread after the last wait ends the open.
@@ -867,6 +938,7 @@ int main(int argc, char** argv) {
       {"stale_poll", stale_poll},
       {"abandoned_command", abandoned_command},
       {"close_unanswered_wait", close_unanswered_wait},
+      {"worker_end_during_reopen", worker_end_during_reopen},
       {"close_during_last_command", close_during_last_command},
       {"attach", attach}};
   if (argc > 1) {
@@ -917,8 +989,11 @@ CONTROLS = [
     ('a failed reopen does not report the stop of the replaced item',
      'if (reopen && !m_started)\n', 'if (reopen && false)\n'),
     ('the worker reports the end twice',
-     'if (m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false))',
-     'if (m_delegate->GetTransportState() == "STOPPED" && m_started)'),
+     'ended = m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false);',
+     'ended = m_delegate->GetTransportState() == "STOPPED" && m_started;'),
+    ('the worker reads the state outside the state lock',
+     '        std::unique_lock<CCriticalSection> lock(m_stateSection);\n        ended =', '        ended ='),
+
 ]
 
 
@@ -937,6 +1012,11 @@ def production():
     poll = '    PollTransportInfo(m_delegate->UpdatePositionInfo());\n'
     assert poll in process
     worker = poll + function(process, '    if (m_started)')
+    # the thread case enters the worker after the started check
+    entered = '    if (m_started)\n    {\n'
+    assert worker.count(entered) == 1
+    worker = worker.replace(entered, entered + '      if (g_workerEntered)\n        g_workerEntered();\n')
+    body = 'std::function<void()> g_workerEntered;\n' + body
     body += '\nvoid CUPnPPlayer::WorkerStep()\n{\n' + worker + '\n}\n'
     code = PRELUDE.replace('@PRODUCTION@', 'namespace UPNP {\n' + command + body + '\n}  // namespace UPNP')
     return code, header
@@ -962,7 +1042,7 @@ def main():
 
 CASES = ['normal_open_close', 'close_twice', 'reopen', 'close_inside_wait',
          'close_inside_wait_renderer_playing', 'newer_player_on_same_renderer',
-         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command', 'close_unanswered_wait',
+         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command', 'close_unanswered_wait', 'worker_end_during_reopen',
          'close_during_last_command', 'attach']
 
 
@@ -971,7 +1051,7 @@ def run(code, expect_failure=False, label=''):
         out = Path(temporary)
         (out / 'test.cpp').write_text(code)
         subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-Wno-unused-parameter', '-fsanitize=address,undefined',
+                        '-Wno-unused-parameter', '-pthread', '-fsanitize=address,undefined',
                         '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
                         str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         failures = {}
