@@ -18,8 +18,8 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 
-class CEvent;
 class PLT_MediaController;
 
 namespace UPNP
@@ -61,7 +61,9 @@ public:
 
 private:
   bool IsPaused() const;
-  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  // Starts a new open; the waits of the older open end
+  uint64_t AdvanceOpen();
+  int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
   // An open publishes the transport state of the renderer and starts a new epoch
   void PublishTransportInfo(const CUPnPCommand& info);
   // The worker polls the transport state when send is true
@@ -82,6 +84,8 @@ private:
   std::atomic<bool> m_stopremote{false};
   // The current open; a newer open and a close advance the sequence
   std::atomic<uint64_t> m_openSequence{0};
+  CCriticalSection m_waitSection;
+  std::vector<CUPnPCommand*> m_waiting; // the commands that an open waits for
   CCriticalSection m_pollSection;
   std::shared_ptr<CUPnPCommand> m_poll;
   uint64_t m_pollEpoch{0};

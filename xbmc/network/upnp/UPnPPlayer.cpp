@@ -224,9 +224,30 @@ CUPnPPlayer::~CUPnPPlayer()
   CUPnP::UnregisterUserdata(m_delegate.get());
 }
 
-int CUPnPPlayer::WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open)
+uint64_t CUPnPPlayer::AdvanceOpen()
 {
-  if (!event.Wait(0ms) && !CGUIDialogBusy::WaitOnEvent(event))
+  std::unique_lock<CCriticalSection> lock(m_waitSection);
+  const uint64_t open = ++m_openSequence;
+  // end the waits of the older open, also without an answer of the renderer
+  for (CUPnPCommand* command : m_waiting)
+    command->m_event.Set();
+  return open;
+}
+
+int CUPnPPlayer::WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open)
+{
+  {
+    std::unique_lock<CCriticalSection> lock(m_waitSection);
+    if (open != m_openSequence)
+      return NPT_FAILURE;
+    m_waiting.push_back(&command);
+  }
+  const bool answered = command.m_event.Wait(0ms) || CGUIDialogBusy::WaitOnEvent(command.m_event);
+  {
+    std::unique_lock<CCriticalSection> lock(m_waitSection);
+    m_waiting.erase(std::find(m_waiting.begin(), m_waiting.end(), &command));
+  }
+  if (!answered)
     return NPT_FAILURE;
 
   // The busy dialog processes messages: CloseFile or a newer open of this player
@@ -297,7 +318,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
     NPT_CHECK_LABEL_SEVERE(
         m_control->GetTransportInfo(m_delegate->m_device, m_delegate->m_instance, info.get()),
         failed_gettransportinfo);
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(info->m_event, timeout, open), failed_gettransportinfo);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*info, timeout, open), failed_gettransportinfo);
     PublishTransportInfo(*info);
     stopFirst = info->m_trainfo.cur_transport_state != "NO_MEDIA_PRESENT" &&
                 info->m_trainfo.cur_transport_state != "STOPPED";
@@ -309,7 +330,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
     const auto stop = NewCommand();
     NPT_CHECK_LABEL_SEVERE(
         m_control->Stop(m_delegate->m_device, m_delegate->m_instance, stop.get()), failed_stop);
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(stop->m_event, timeout, open), failed_stop);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*stop, timeout, open), failed_stop);
     NPT_CHECK_LABEL_SEVERE(stop->m_status, failed_stop);
   }
 
@@ -321,7 +342,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
                                                         obj->m_Resources[res_index].m_Uri,
                                                         (const char*)tmp, uri.get()),
                            failed_setavtransporturi);
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(uri->m_event, timeout, open), failed_setavtransporturi);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*uri, timeout, open), failed_setavtransporturi);
     NPT_CHECK_LABEL_SEVERE(uri->m_status, failed_setavtransporturi);
   }
 
@@ -332,7 +353,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
         m_control->Play(m_delegate->m_device, m_delegate->m_instance, "1", play.get()), failed_play);
     // the renderer plays for this player now, CloseFile must stop the renderer
     m_stopremote = true;
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(play->m_event, timeout, open), failed_play);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*play, timeout, open), failed_play);
     NPT_CHECK_LABEL_SEVERE(play->m_status, failed_play);
   }
 
@@ -344,7 +365,7 @@ int CUPnPPlayer::PlayFile(const CFileItem& file,
     NPT_CHECK_LABEL_SEVERE(
         m_control->GetTransportInfo(m_delegate->m_device, m_delegate->m_instance, info.get()),
         failed_waitplaying);
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(info->m_event, timeout, open), failed_waitplaying);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*info, timeout, open), failed_waitplaying);
     PublishTransportInfo(*info);
 
     const NPT_String& transportState = info->m_trainfo.cur_transport_state;
@@ -401,7 +422,7 @@ failed:
 bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
 {
   XbmcThreads::EndTime<> timeout(10s);
-  const uint64_t open = ++m_openSequence;
+  const uint64_t open = AdvanceOpen();
   // An open of a playing player replaces the item without an end notification,
   // like VideoPlayer: the stop of the renderer below is not the end of the item.
   // A failed open reports the stop of the replaced item.
@@ -414,7 +435,7 @@ bool CUPnPPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options)
     NPT_CHECK_LABEL_SEVERE(
         m_control->GetTransportInfo(m_delegate->m_device, m_delegate->m_instance, info.get()), failed);
 
-    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(info->m_event, timeout, open), failed);
+    NPT_CHECK_LABEL_SEVERE(WaitOnEvent(*info, timeout, open), failed);
     PublishTransportInfo(*info);
 
     /* make sure the attached player is actually playing */
@@ -506,7 +527,7 @@ failed:
 bool CUPnPPlayer::CloseFile(bool reopen)
 {
   // stops an OpenFile that waits for the renderer
-  ++m_openSequence;
+  AdvanceOpen();
   NPT_CHECK_POINTER_LABEL_SEVERE(m_delegate, failed);
   // stop the renderer once, a newer player can use the renderer after the stop.
   // After a failed stop the renderer still plays for this player.

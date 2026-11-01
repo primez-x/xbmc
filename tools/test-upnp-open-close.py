@@ -173,14 +173,20 @@ template<class T = std::chrono::milliseconds> struct EndTime {
 // A busy-dialog wait runs the hook (the message pump), then the renderer answers.
 int g_waits = 0;
 std::function<void(int)> g_waitHook;
+// The busy dialog waits until the event is set; a wait that no pending answer and
+// no other wake can end never ends.
+bool PendingEmpty();
 struct CGUIDialogBusy {
   static bool WaitOnEvent(CEvent& event) {
     ++g_waits;
     auto hook = g_waitHook;
     if (hook)
       hook(g_waits);
-    DeliverPending();
-    return event.Wait(0ms);
+    while (!event.Wait(0ms)) {
+      CHECK(!PendingEmpty());  // the busy dialog would wait forever
+      DeliverPending();
+    }
+    return true;
   }
 };
 
@@ -262,6 +268,7 @@ public:
   int transitioning = 0;  // the later GetTransportInfo answers that report TRANSITIONING
   std::string uri;      // the URI of the last SetAVTransportURI
   std::string nextState;  // the state of the next GetTransportInfo answer, once
+  bool playUnanswered = false;  // the renderer never answers Play
 };
 
 NPT_Result PLT_MediaController::Send(PLT_DeviceDataReference& device, void* userdata,
@@ -318,6 +325,8 @@ NPT_Result PLT_MediaController::SetAVTransportURI(PLT_DeviceDataReference& devic
 }
 NPT_Result PLT_MediaController::Play(PLT_DeviceDataReference& device, NPT_UInt32, const char*,
                                      void* userdata) {
+  if (device.owner->playUnanswered)
+    return Send(device, userdata, "Play", nullptr);
   return Send(device, userdata, "Play", [device](PLT_MediaControllerDelegate& d) {
     auto dev = device;
     d.OnPlayResult(NPT_SUCCESS, dev, nullptr);
@@ -343,7 +352,8 @@ public:
   bool CloseFile(bool reopen = false);
   int PlayFile(const CFileItem& file, const CPlayerOptions& options, XbmcThreads::EndTime<>& timeout,
                uint64_t open);
-  int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  uint64_t AdvanceOpen();
+  int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
   void PublishTransportInfo(const CUPnPCommand& info);
   void PollTransportInfo(bool send);
   bool IsRunning() const { return running; }
@@ -361,6 +371,8 @@ public:
   std::atomic<bool> m_started{false};
   std::atomic<bool> m_stopremote{false};
   std::atomic<uint64_t> m_openSequence{0};
+  CCriticalSection m_waitSection;
+  std::vector<CUPnPCommand*> m_waiting;
   CCriticalSection m_pollSection;
   std::shared_ptr<CUPnPCommand> m_poll;
   uint64_t m_pollEpoch{0};
@@ -379,6 +391,7 @@ void CUPnP::UnregisterUserdata(void* userdata) {
   auto& v = UPNP::g_userdata;
   v.erase(std::remove(v.begin(), v.end(), userdata), v.end());
 }
+bool PendingEmpty() { return UPNP::g_ctl.pending.empty(); }
 // One delivery round. Platinum drops the answer for a userdata that is not
 // registered.
 void DeliverPending() {
@@ -747,11 +760,34 @@ void abandoned_command() {
   };
   CHECK(!p.OpenFile(Item(), CPlayerOptions()));
   CHECK(abandoned && Registered(abandoned));
-  DeliverPending();
-  DeliverPending();
-  CHECK(g_ctl.pending.empty() && Registered(abandoned));
+  CHECK(!g_ctl.pending.empty());  // the answer has yet to arrive
+  while (!g_ctl.pending.empty())
+    DeliverPending();
+  CHECK(Registered(abandoned));
   // the answered command is freed later; the player opens again
   CHECK(p.OpenFile(Item(), CPlayerOptions()));
+}
+
+// A close ends the wait of an open, also when the renderer never answers the
+// command of the wait.
+void close_unanswered_wait() {
+  Begin("close during a wait without an answer");
+  IPlayerCallback cb;
+  {
+    CUPnPPlayer p(cb, "P");
+    p.m_delegate->playUnanswered = true;
+    g_waitHook = [&](int w) {
+      if (w != 3)  // the wait for the answer to Play
+        return;
+      g_waitHook = nullptr;
+      CHECK(p.CloseFile());
+    };
+    CHECK(!p.OpenFile(Item(), CPlayerOptions()));
+    CHECK(cb.Total() == 0 && p.creates == 0);
+  }
+  auto want = Of("P", Head(NORMAL, 3));
+  want.push_back("P:Stop");
+  ExpectLog(want);
 }
 
 void close_during_last_command() {
@@ -830,6 +866,7 @@ int main(int argc, char** argv) {
       {"reopen_notifications", reopen_notifications},
       {"stale_poll", stale_poll},
       {"abandoned_command", abandoned_command},
+      {"close_unanswered_wait", close_unanswered_wait},
       {"close_during_last_command", close_during_last_command},
       {"attach", attach}};
   if (argc > 1) {
@@ -854,11 +891,13 @@ CONTROLS = [
     ('Play does not mark the renderer as started',
      '    m_stopremote = true;\n    NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '    NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
     ('OpenFile does not start a new open',
-     'const uint64_t open = ++m_openSequence;', 'const uint64_t open = m_openSequence;'),
+     'const uint64_t open = AdvanceOpen();', 'const uint64_t open = m_openSequence;'),
     ('OpenFile does not check the open sequence before starting',
      'if (open != m_openSequence)\n    goto failed;', 'if (false)\n    goto failed;'),
     ('CloseFile does not end the open',
-     '  ++m_openSequence;\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
+     '  AdvanceOpen();\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
+    ('a new open does not end the waits of the older open',
+     '    command->m_event.Set();\n', '    (void)command;\n'),
     ('CloseFile can stop the renderer twice',
      '    m_stopremote = false;\n  }', '  }'),
     ('CloseFile drops the renderer before the stop succeeds',
@@ -889,7 +928,7 @@ def production():
     command = source.index('class CUPnPCommand : public PLT_MediaControllerDelegate')
     command = source[command:source.index('\n};\n', command) + 4]
     command += function(source, 'static std::shared_ptr<CUPnPCommand> NewCommand()')
-    signatures = ['int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
+    signatures = ['uint64_t CUPnPPlayer::AdvanceOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
                   'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()',
                   'void CUPnPPlayer::PublishTransportInfo(', 'void CUPnPPlayer::PollTransportInfo(']
     body = '\n'.join(function(source, signature) for signature in signatures)
@@ -913,7 +952,7 @@ def main():
     assert 'std::atomic<uint64_t> m_openSequence' in header, 'm_openSequence must be atomic (CloseFile runs on another thread)'
     assert 'std::atomic<bool> m_stopremote' in header, 'm_stopremote must be atomic'
     assert 'std::atomic<bool> m_started' in header, 'm_started must be atomic (the worker thread reads the flag)'
-    assert 'int WaitOnEvent(CEvent& event, XbmcThreads::EndTime<>& timeout, uint64_t open);' in header
+    assert 'int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);' in header
     if args.negative_controls:
         for label, before, after in CONTROLS:
             assert before in code, label
@@ -923,7 +962,7 @@ def main():
 
 CASES = ['normal_open_close', 'close_twice', 'reopen', 'close_inside_wait',
          'close_inside_wait_renderer_playing', 'newer_player_on_same_renderer',
-         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command',
+         'newer_open_on_same_player', 'rejected_stop', 'transitioning_renderer', 'reopen_notifications', 'stale_poll', 'abandoned_command', 'close_unanswered_wait',
          'close_during_last_command', 'attach']
 
 
