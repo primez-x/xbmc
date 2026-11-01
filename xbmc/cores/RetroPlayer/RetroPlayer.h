@@ -141,9 +141,12 @@ private:
 
   // Synchronization parameters
   CCriticalSection m_mutex;
-  // The close reports the end of an item once. A close during the dialogs of
-  // the open (a newer item retires the player) cancels the open.
-  std::atomic<bool> m_ended{true};
+  // The item of the open, from the start of the open until the close. A close
+  // during the dialogs of the open (a newer item retires the player) cancels
+  // the open, and a close without an item changes nothing.
+  std::atomic<bool> m_itemOpen{false};
+  // The close reports the end only of a started game
+  std::atomic<bool> m_started{false};
 };
 } // namespace RETRO
 } // namespace KODI

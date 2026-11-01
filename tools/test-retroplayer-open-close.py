@@ -4,9 +4,11 @@
 A newer item can retire the game player while the open of the game waits in a
 dialog (the game client selection with the emulator install, the savestate
 question): the router closes the player, and the open of the newer item can
-complete before the dialog returns. The open of the game then starts nothing.
-The close reports the end of an item once, so the close in the destructor of
-the retired player reports no late end that stops the newer item.
+complete before the dialog returns. The open of the game then starts nothing. The close of a player
+reports the end only of a started game, and a close without an open item
+changes nothing: the retired player reports no end that stops the newer item,
+and the close in the destructor of the retired player keeps the render
+callbacks of a newer game.
 """
 import runpy
 import subprocess
@@ -98,11 +100,11 @@ int main(){
    const auto retire=[&]{assert(player.CloseFile());closed=true;return true;};
    if(dialog==0)clientDialog=retire;else{otherClientSave=true;savestateDialog=retire;}
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{}));
-   assert(closed&&cb.started==0&&cb.ended==1&&!player.IsPlaying());
+   assert(closed&&cb.started==0&&cb.ended==0&&!player.IsPlaying());
    assert(CServiceBroker::GetAppMessenger()->fullscreen==0);
   }
-  // the destructor of the retired player reports no second end
-  assert(cb.ended==1);
+  // the game never started: the destructor reports no end
+  assert(cb.ended==0);
  }
  // An open without a close plays; the close reports the end once.
  {reset();Callback cb;
@@ -114,19 +116,77 @@ int main(){
   assert(cb.ended==1);
  }
  // A declined savestate question and a cancelled game client selection fail
- // the open; the close of the player still reports the end, as upstream.
+ // the open; the game never started, and the close reports no end.
  for(int dialog=0;dialog<2;++dialog){reset();Callback cb;
   {CRetroPlayer player(cb);
    if(dialog==0)clientDialog=[]{return false;};else{otherClientSave=true;savestateDialog=[]{return false;};}
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{})&&cb.started==0&&cb.ended==0);
   }
-  assert(cb.ended==1);
+  assert(cb.ended==0);
  }
  // A player that never opened reports no end.
  {reset();Callback cb;{CRetroPlayer player(cb);}assert(cb.ended==0);}
- std::cout<<"RetroPlayer open/close: PASS (production OpenFile and CloseFile; ASan/UBSan)\n";
 }
 '''
+
+# The render manager of the games is shared, and the unregistration has no
+# owner: a newer game that starts during the dialog of the retired game keeps
+# the render callbacks and the render targets after the retired player ends.
+RENDER_MANAGER = r'''
+struct Dummy; struct CRetroPlayer;
+using CGUIRenderTargetFactory=Dummy; using IRenderCallback=Dummy; using IGameCallback=CRetroPlayer;
+struct CGUIRenderHandle {}; struct CGUIRenderTarget {};
+struct CGUIGameRenderManager {
+ CCriticalSection m_targetMutex,m_callbackMutex,m_gameCallbackMutex;
+ CGUIRenderTargetFactory* m_factory=nullptr; IRenderCallback* m_callback=nullptr;
+ IGameCallback* m_gameCallback=nullptr;
+ std::map<CGUIRenderHandle*,std::shared_ptr<CGUIRenderTarget>> m_renderTargets;
+ void RegisterPlayer(CGUIRenderTargetFactory*,IRenderCallback*,IGameCallback*);
+ void UnregisterPlayer(); void UpdateRenderTargets(); bool IsPlayingGame();
+ CGUIRenderTarget* CreateRenderTarget(CGUIRenderHandle*){return new CGUIRenderTarget;}
+};
+static CGUIGameRenderManager sharedRenderer;
+'''
+
+RENDER_MAIN = r'''
+int main(){
+ for(int dialog=0;dialog<2;++dialog){
+  Callback oldCb,newCb;
+  auto old=std::make_unique<CRetroPlayer>(oldCb);
+  auto newer=std::make_unique<CRetroPlayer>(newCb);
+  CGUIRenderHandle handle;
+  sharedRenderer.m_renderTargets.emplace(&handle,nullptr);
+  const auto replace=[&]{
+   assert(old->CloseFile());
+   otherClientSave=false;
+   assert(newer->OpenFile(CFileItem{},CPlayerOptions{}));
+   assert(sharedRenderer.m_gameCallback==newer.get()&&sharedRenderer.m_renderTargets.at(&handle));
+   return true;
+  };
+  if(dialog==0)clientDialog=replace;else{otherClientSave=true;savestateDialog=replace;}
+  assert(!old->OpenFile(CFileItem{},CPlayerOptions{}));
+  old.reset();
+  assert(oldCb.started==0&&oldCb.ended==0);
+  assert(newer->IsPlaying()&&newCb.started==1&&newCb.ended==0);
+  assert(sharedRenderer.IsPlayingGame()&&sharedRenderer.m_gameCallback==newer.get());
+  assert(sharedRenderer.m_renderTargets.at(&handle));
+  newer.reset();
+  assert(newCb.ended==1&&!sharedRenderer.IsPlayingGame());
+  sharedRenderer.m_renderTargets.clear();
+ }
+ std::cout<<"RetroPlayer render callbacks: PASS (production registration; ASan/UBSan)\n";
+}
+'''
+
+
+def compile_run(code):
+    with tempfile.TemporaryDirectory(prefix='retroplayer-open-close-') as tmp:
+        out = Path(tmp)
+        (out / 'test.cpp').write_text(code)
+        subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                        '-Wno-misleading-indentation', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-fno-omit-frame-pointer', str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
+        subprocess.run([str(out / 'test')], check=True, timeout=15)
 
 
 def main():
@@ -135,15 +195,28 @@ def main():
     # The production state members of the open and the close.
     members = header[header.index('  // Synchronization parameters'):header.index('};\n} // namespace RETRO')]
     members = members.replace('  CCriticalSection m_mutex;\n', '')
-    code = PRELUDE.replace('@MEMBERS@', members) + function(source, 'bool CRetroPlayer::OpenFile(') + \
-        function(source, 'bool CRetroPlayer::CloseFile(') + MAIN
-    with tempfile.TemporaryDirectory(prefix='retroplayer-open-close-') as tmp:
-        out = Path(tmp)
-        (out / 'test.cpp').write_text(code)
-        subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
-                        '-Wno-misleading-indentation', '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer',
-                        str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
-        subprocess.run([str(out / 'test')], check=True, timeout=15)
+    prelude = PRELUDE.replace('@MEMBERS@', members)
+    player = function(source, 'bool CRetroPlayer::OpenFile(') + function(source, 'bool CRetroPlayer::CloseFile(')
+    compile_run(prelude + player + MAIN)
+    # The production registration of the window callbacks and the render manager.
+    manager = (ROOT / 'xbmc/cores/RetroPlayer/guibridge/GUIGameRenderManager.cpp').read_text()
+    render = prelude.replace('#include <atomic>', '#include <atomic>\n#include <map>', 1)
+    render = render.replace('struct GameServices {', RENDER_MANAGER +
+                            'struct GameServices {CGUIGameRenderManager& GameRenderManager(){return sharedRenderer;}', 1)
+    render = render.replace('struct Dummy {', 'struct Dummy {Dummy* GetGUIRenderTargetFactory(){return this;}', 1)
+    render = render.replace('void RegisterWindowCallbacks(){}void UnregisterWindowCallbacks(){}',
+                            'void RegisterWindowCallbacks();void UnregisterWindowCallbacks();', 1)
+    # The production constructor creates the playback (ResetPlayback), and the close saves the game.
+    render = render.replace('explicit CRetroPlayer(Callback& c):m_callback(c){}',
+                            'explicit CRetroPlayer(Callback& c):m_callback(c){m_playback=std::make_unique<Dummy>();}', 1)
+    render = render.replace('bool AutosaveEnabled(){return false;}', 'bool AutosaveEnabled(){return true;}', 1)
+    for signature in ('void CGUIGameRenderManager::RegisterPlayer(', 'void CGUIGameRenderManager::UnregisterPlayer()',
+                      'void CGUIGameRenderManager::UpdateRenderTargets()', 'bool CGUIGameRenderManager::IsPlayingGame()'):
+        render += function(manager, signature)
+    for signature in ('void CRetroPlayer::RegisterWindowCallbacks()', 'void CRetroPlayer::UnregisterWindowCallbacks()'):
+        render += function(source, signature)
+    compile_run(render + player + RENDER_MAIN)
+    print('RetroPlayer open/close: PASS (production OpenFile, CloseFile and render registration; ASan/UBSan)')
 
 
 if __name__ == '__main__':
