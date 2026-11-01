@@ -70,12 +70,13 @@ struct Dummy {template<class... A> explicit Dummy(A&&...){} Dummy()=default;void
 struct CRPProcessInfo: Dummy {static std::unique_ptr<CRPProcessInfo> CreateInstance(){return std::make_unique<CRPProcessInfo>();}};
 using CGUIGameMessenger=Dummy;using CRPRenderManager=Dummy;using CRPStreamManager=Dummy;
 using CRetroPlayerInput=Dummy;using CCheevos=Dummy;using CGUIPlaybackControl=Dummy;using CRetroPlayerAutoSave=Dummy;
-static int gameOpens=0,gameCloses=0;
-struct CGameClient {bool playing=false,loaded=false;bool Initialize(){Wait(INITIALIZE);loaded=true;return true;}
- template<class... A> bool OpenFile(A&&...){Wait(GAME_OPEN);++gameOpens;playing=true;return true;}
+static int gameOpens=0,gameCloses=0;static bool initializeFails=false,gameOpenFails=false;
+struct CGameClient {bool playing=false,loaded=false;bool Initialize(){Wait(INITIALIZE);loaded=true;return !initializeFails;}
+ template<class... A> bool OpenFile(A&&...){Wait(GAME_OPEN);if(gameOpenFails)return false;++gameOpens;playing=true;return true;}
  template<class... A> bool OpenStandalone(A&&...){++gameOpens;playing=true;return true;}
  std::string ID(){return "game.test";}std::string Name(){return "test";}float GetFrameRate(){return 60;}
- void CloseFile(){++gameCloses;playing=false;}void Unload(){loaded=false;playing=false;}
+ // like the production close, a close of a game that is not playing does nothing
+ void CloseFile(){if(playing)++gameCloses;playing=false;}void Unload(){loaded=false;playing=false;}
 };
 // The add-on manager returns the one cached game client of an add-on to every player.
 static std::shared_ptr<CGameClient>& CachedClient(){static auto client=std::make_shared<CGameClient>();return client;}
@@ -113,7 +114,7 @@ struct CRetroPlayer {
 '''
 
 MAIN = r'''
-static void reset(){gameOpens=gameCloses=savestates=questions=agentInputs=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
+static void reset(){gameOpens=gameCloses=savestates=questions=agentInputs=0;otherClientSave=initializeFails=gameOpenFails=false;waitStep=-1;waitHook=nullptr;
  startedHook=nullptr;CachedClient()=std::make_shared<CGameClient>();CServiceBroker::GetAppMessenger()->fullscreen=0;}
 int main(){
  // A newer item retires the player during each step of the open that can wait
@@ -150,14 +151,23 @@ int main(){
   }
   assert(cb.ended==1);
  }
- // A declined savestate question and a cancelled game client selection fail
- // the open; the game never started, and the close reports no end.
- for(int dialog=0;dialog<2;++dialog){reset();Callback cb;
+ // A cancelled game client selection, a declined savestate question, a failed
+ // open of the game and a failed initialization fail the open; the game never
+ // started, and the close reports no end. The failed open releases the item
+ // like a close: the shared agent input stops, an opened game closes, and the
+ // cached game client unloads.
+ for(int failure=0;failure<4;++failure){reset();Callback cb;
   {CRetroPlayer player(cb);
-   if(dialog==0)clientDialog=[]{return false;};else{otherClientSave=true;savestateDialog=[]{return false;};}
+   if(failure==0)clientDialog=[]{return false;};
+   else if(failure==1){otherClientSave=true;savestateDialog=[]{return false;};}
+   else if(failure==2)gameOpenFails=true;
+   else initializeFails=true;
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{})&&cb.started==0&&cb.ended==0);
+   assert(agentInputs==0&&gameCloses==gameOpens&&!CachedClient()->playing&&!CachedClient()->loaded);
+   assert(!player.m_gameClient&&!player.m_input&&!player.m_processInfo);
+   assert(player.CloseFile());
   }
-  assert(cb.ended==0);
+  assert(cb.ended==0&&agentInputs==0&&gameCloses==gameOpens);
  }
  // A player that never opened reports no end.
  {reset();Callback cb;{CRetroPlayer player(cb);}assert(cb.ended==0);}

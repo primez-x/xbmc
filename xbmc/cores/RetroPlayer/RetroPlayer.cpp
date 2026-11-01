@@ -82,14 +82,17 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
 
   {
     std::unique_lock<CCriticalSection> lock(m_itemMutex);
-    if (m_itemState == ItemState::OPENING)
+    if (m_itemState == ItemState::OPENING && opened)
     {
       m_itemState = ItemState::OPEN;
-      return opened;
+      return true;
     }
+    if (m_itemState == ItemState::CLOSING)
+      CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the open");
   }
 
-  CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the open");
+  // A failed or closed open releases the item like a close: the shared agent
+  // input stops, an opened game closes, and the cached game client unloads.
   CloseItem();
 
   std::unique_lock<CCriticalSection> lock(m_itemMutex);
@@ -245,14 +248,6 @@ bool CRetroPlayer::OpenItem(const CFileItem& file, const CPlayerOptions& options
 
     // Set video framerate
     m_processInfo->SetVideoFps(static_cast<float>(m_gameClient->GetFrameRate()));
-  }
-  else
-  {
-    m_input.reset();
-    m_streamManager.reset();
-    if (m_gameClient)
-      m_gameClient->Unload();
-    m_gameClient.reset();
   }
 
   return bSuccess;
