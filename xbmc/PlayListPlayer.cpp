@@ -362,7 +362,7 @@ bool CPlayListPlayer::Play(int iSong,
   // if they refer to each other in a loop
   for (int i=0; i<5; i++)
   {
-    if(!playlist.Expand(iSong))
+    if (!playlist.Expand(iSong, [&] { return appPlayer->OpenSuperseded(attempt); }))
       break;
   }
   // The expansion can wake a network share, and the wake dialog processes

@@ -414,7 +414,7 @@ int main(){
 # The production playlist Play, with its failure handling, replaces the recording stand-in.
 PLAY_TESTS = r"""
 static void playlist(CApplication& app){
- auto& playlist=CServiceBroker::playlist;playlist.list.items[0]->id=40;playlist.list.items[1]->id=41;(void)app;
+ auto& playlist=CServiceBroker::playlist;playlist.list.m_vecItems[0]->id=40;playlist.list.m_vecItems[1]->id=41;(void)app;
 }
 int main(){
  (void)&replace;(void)&opensLatest; // The cases of the first build use the helpers.
@@ -430,6 +430,7 @@ int main(){
  // playlist item cancels the item before the playlist changes.
  for(bool newer:{false,true}){CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
   auto& playlist=CServiceBroker::playlist;playlist.m_iCurrentSong=1;int after=-2,list=-2;
+  playlist.list.m_vecItems[0]->path="smb://share/list.m3u";
   expansion=[&]{
    if(!newer)app.StopPlaying(),app.player.OnPlaybackStopped(),app.Frame();
    else{CFileItem c;c.id=50;assert(app.PlayFile(c,"old",false,false));
@@ -441,6 +442,31 @@ int main(){
   assert(playlist.GetCurrentPlaylist()==list&&app.stackPlays==(newer?1:0));
   if(newer)assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50&&!app.player.HasPendingOpen());
   else assert(!app.player.HasPlayer()&&!app.player.HasPendingOpen());
+ }
+ // The user selects the next item during the expansion: the item plays, the
+ // cancelled expansion leaves the playlist unchanged, and the playlist continues
+ // after the item, also at the end of the item.
+ for(bool ends:{false,true}){CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  playlist.list.m_vecItems[0]->path="smb://share/list.m3u";
+  auto z=std::make_shared<CFileItem>();z->id=42;playlist.list.m_vecItems.push_back(z);
+  expansion=[&]{assert(playlist.Play(1,"old"));app.player.OnPlaybackStopped();app.Frame();
+   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==41);};
+  assert(!playlist.Play(0,"old"));
+  assert(playlist.list.size()==3&&playlist.list.m_vecItems[0]->id==40&&playlist.m_iCurrentSong.load()==1);
+  if(!ends)assert(playlist.PlayNext());
+  else{app.player.m_pPlayer->playing=false;app.player.m_pPlayer->canClose=true;app.Ended();
+   if(app.player.HasPendingOpen()){app.player.OnPlaybackStopped();app.Frame();}}
+  assert(app.player.m_pPlayer->lastItem==42);
+ }
+ // An expansion that nothing supersedes replaces the playlist item with the
+ // entries, and the first entry plays.
+ {CApplication app;begin(app);reset();playlist(app);auto old=app.player.m_pPlayer;old->canClose=true;
+  auto& playlist=CServiceBroker::playlist;
+  playlist.list.m_vecItems[0]->path="smb://share/list.m3u";
+  assert(playlist.Play(0,"old"));app.player.OnPlaybackStopped();app.Frame();
+  assert(playlist.list.size()==4&&playlist.list.m_vecItems[0]->id==50&&playlist.list.m_vecItems[3]->id==41);
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==50);
  }
  // The same, but the user restarts the item from the playlist during the
  // resolution: the restart plays, and the cancelled attempt changes nothing.
@@ -581,7 +607,7 @@ int main(){
  // A queued open X that opens and ends during the resolution of a newer item Y:
  // Y supersedes the end of X, and Y plays.
  {CApplication app;begin(app);reset();playlist(app);auto& playlist=CServiceBroker::playlist;
-  auto z=std::make_shared<CFileItem>();z->id=42;playlist.list.items.push_back(z);
+  auto z=std::make_shared<CFileItem>();z->id=42;playlist.list.m_vecItems.push_back(z);
   auto old=app.player.m_pPlayer;old->playing=false;
   assert(playlist.Play(0,"old")&&app.player.HasPendingOpen());app.player.OnPlaybackStopped();
   app.nested=[&]{old->canClose=true;app.Frame();assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==40);
@@ -624,7 +650,9 @@ def production_play(code, playlist, extract):
 struct CFileItem {
  void SetProperty(const char*,bool){}void ClearProperty(const char*){}void SetDetectorBinding(std::shared_ptr<int>){}
  bool IsVideoDb()const{return false;} bool HasVideoInfoTag()const{return false;}
- Tag tag;Tag* GetVideoInfoTag(){return &tag;}std::string GetDynPath()const{return "probe";}
+ Tag tag;Tag* GetVideoInfoTag(){return &tag;}std::string path="probe",dynpath;int m_iprogramCount=0;
+ const std::string& GetPath()const{return path;}const std::string& GetDynPath()const{return dynpath.empty()?path:dynpath;}
+ void SetPath(const std::string& p){path=p;}void SetDynPath(const std::string& p){dynpath=p;}
  int GetStartOffset()const{return 0;}void SetStartOffset(int){}
 """, 1)
     code = code.replace('struct SettingsComponent {', """static int playlistRetries=100;static std::function<void()> failureDialog;
@@ -635,14 +663,33 @@ struct SettingsComponent {
     old = 'struct CPlayList {int size()const{return 2;}int GetPlayable()const{return 2;}};'
     assert code.count(old) == 1
     code = code.replace(old, """using CFileItemPtr=std::shared_ptr<CFileItem>;
-// The expansion of a playlist item can process messages (the wake-on-access dialog).
+// The production expansion. The load of a playlist file can process messages
+// (the wake-on-access dialog), and a loaded playlist has the entries 50, 51, 52.
 static std::function<void()> expansion;
 struct CPlayList {
- std::vector<CFileItemPtr> items{std::make_shared<CFileItem>(),std::make_shared<CFileItem>()};int unplayable=0;
- int size()const{return items.size();}int GetPlayable()const{return size()-unplayable;}
- bool Expand(int){if(auto hook=std::exchange(expansion,{}))hook();return false;}CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?items[n]:nullptr;}
- void SetPlayed(bool){}void SetUnPlayable(int){++unplayable;}void Clear(){items.clear();}
-};""")
+ std::vector<CFileItemPtr> m_vecItems{std::make_shared<CFileItem>(),std::make_shared<CFileItem>()};int unplayable=0;
+ CCriticalSection m_critSection;
+ int size()const{return m_vecItems.size();}int GetPlayable()const{return size()-unplayable;}
+ bool Expand(@EXPAND@);CFileItemPtr TryGet(int n)const{return n>=0&&n<size()?m_vecItems[n]:nullptr;}
+ void SetPlayed(bool){}void SetUnPlayable(int){++unplayable;}void Clear(){m_vecItems.clear();}
+ CFileItemPtr operator[](int n){return m_vecItems[n];}void Remove(int n){m_vecItems.erase(m_vecItems.begin()+n);}
+ std::vector<CFileItemPtr> GetItems()const{return m_vecItems;}
+ void DecrementOrder(int){}void AnnounceRemove(int){}void AnnounceAdd(const CFileItemPtr&,int){}
+ int AddLocked(const CFileItemPtr& entry,int position,int){m_vecItems.insert(m_vecItems.begin()+position,entry);return position;}
+ bool Load(const std::string&){
+  if(auto hook=std::exchange(expansion,{}))hook();
+  m_vecItems.clear();
+  for(int id:{50,51,52}){auto entry=std::make_shared<CFileItem>();entry->id=id;entry->path="entry.mkv";m_vecItems.push_back(entry);}
+  return true;
+ }
+};
+struct CPlayListFactory {
+ static CPlayList* Create(const CFileItem& item){
+  const std::string& path=item.GetDynPath();
+  return path.size()>4&&path.compare(path.size()-4,4,".m3u")==0?new CPlayList:nullptr;
+ }
+};
+namespace StringUtils {bool EqualsNoCase(const std::string& a,const std::string& b){return a==b;}}""")
     # An abandoned resolution fails one item only
     assert code.count('  if(abandon)return false;') == 1
     code = code.replace('  if(abandon)return false;', '  if(std::exchange(abandon,false))return false;')
@@ -658,6 +705,8 @@ struct CPlayList {
                         (',std::optional<bool> = std::nullopt' if optional else '') +
                         ');bool PlayPrevious(){return PlayNext(-1);}')
     production = production.replace('  const Id playlistId', '  auto& g_application=*app;\n  const Id playlistId', 1)
+    expand = extract((ROOT / 'xbmc/playlists/PlayList.cpp').read_text(), 'bool CPlayList::Expand(')
+    code = code.replace('@EXPAND@', expand[expand.index('(') + 1:expand.rindex(')', 0, expand.index('{'))], 1)
     stub = code[code.index('bool CPlayListPlayer::Play(int index,'):]
     stub = stub[:stub.index('\n}\n') + 3]
     return code.replace(stub, """constexpr int STARTOFFSET_RESUME=-1,LOGERROR=1,LOGDEBUG=2;
@@ -667,7 +716,7 @@ namespace XFILE {struct CVideoDatabaseFile {static Tag GetVideoTag(const CURL&){
 namespace HELPERS {template<class... A>void ShowOKDialogText(A&&...){if(failureDialog){auto dialog=std::move(failureDialog);dialog();}}}
 namespace DETECTOR_PLAYBACK {constexpr auto PROPERTY="playback";}
 namespace DETECTOR_ADMISSION {constexpr auto ITEM_SKIP="skip";void CaptureItem(CFileItem&) {}}
-""" + production) + PLAY_TESTS
+""" + production + expand) + PLAY_TESTS
 
 
 
@@ -870,7 +919,10 @@ def main():
     start = function(application, 'bool CApplication::StartMedia(')
     resolved = start.index('GetResolvedPluginResult(item)')
     assert start.index('if (appPlayer->OpenSuperseded(intent))', resolved) < start.index('if (item.IsSmartPlayList())')
-    for anchor, handoff in (('GetRecursiveListing(', 'ProcessAndStartPlaylist(smartpl'),
+    # The last step that can wake a share before the handoff: the name read of a
+    # smart playlist, the load of a playlist
+    for anchor, handoff in (('GetRecursiveListing(', 'if (items.Size())'),
+                            ('OpenAndReadName(', 'ProcessAndStartPlaylist(smartpl'),
                             ('CGUIDialogBusy::Wait(&getPlaylist', 'ProcessAndStartPlaylist(item.GetPath()')):
         assert start.index('OpenSuperseded(intent)', start.index(anchor)) < start.index(handoff), anchor
     single = playlist[playlist.index('        if (list->Size() == 1 && !(*list)[0]->IsPlayList())'):]

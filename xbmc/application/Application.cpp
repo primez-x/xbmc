@@ -2549,6 +2549,9 @@ bool CApplication::StartMedia(CFileItem& item,
       CSmartPlaylist smartpl;
       //get name and type of smartplaylist, this will always succeed as GetDirectory also did this.
       smartpl.OpenAndReadName(item.GetURL());
+      // The read can wake a network share too
+      if (appPlayer->OpenSuperseded(intent))
+        return false;
       PLAYLIST::CPlayList playlist;
       playlist.Add(items);
       PLAYLIST::Id smartplPlaylistId = PLAYLIST::TYPE_VIDEO;
