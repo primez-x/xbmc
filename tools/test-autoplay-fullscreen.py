@@ -27,9 +27,9 @@ PRELUDE = PRELUDE.replace('int created=0;', """int created=0;bool failCreate=fal
   bool HasPendingOpen()const;bool HasPendingVideoOpen()const;
   bool HasPlayer()const{return bool(m_pPlayer);}
   bool PreparePlaybackCleanup();bool PlaybackCleanupCompleted()const;bool PlaybackCleanupPending()const{return m_cleanupPending;}
-  bool IsPlaying()const{return m_pPlayer&&m_pPlayer->playing;}
-  bool IsPlayingVideo(){return IsPlaying()&&m_pPlayer->hasVideo;}
-  bool IsPlayingAudio(){return IsPlaying()&&m_pPlayer->hasAudio;}
+  bool IsPlaying()const;
+  bool IsPlayingVideo(){return IsPlaying()&&m_pPlayer&&m_pPlayer->hasVideo;}
+  bool IsPlayingAudio(){return IsPlaying()&&m_pPlayer&&m_pPlayer->hasAudio;}
   std::string GetName(){return "old";}""")
 PRELUDE = PRELUDE.replace('assert(!m_pPlayer);++created;', 'assert(!m_pPlayer);if(failCreate)return;++created;')
 HARNESS = r"""
@@ -212,7 +212,7 @@ def main():
     parser.add_argument('--negative-control',action='store_true')
     args=parser.parse_args()
     source=(ROOT/'xbmc/application/ApplicationPlayer.cpp').read_text()
-    signatures=['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
+    signatures=['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()', 'bool CApplicationPlayer::IsPlaying() const',
                 'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
                 'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
                 'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(']
@@ -259,7 +259,7 @@ def main():
             run(code.replace(needle,'').replace('  if (HasPendingOpen())\n    return false;','')
                 .replace('generation != m_openGeneration || HasPendingOpen() || HasPlayer()',
                          'generation != m_openGeneration || HasPlayer()'),
-                "Assertion `!app.player.HasPlayer()&&app.player.HasPendingOpen()'")
+                "Assertion `gfx.fullscreen&&CServiceBroker::gui.wm.previous==0&&app.stack.clears==0'")
             needle='  if (opening && !appPlayer->HasPendingOpen() && (!openingVideo || !appPlayer->IsPlaying()))'
             assert code.count(needle)==1
             run(code.replace(needle,needle.replace('if (opening', 'if (false && opening')),

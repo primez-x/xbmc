@@ -48,7 +48,10 @@ bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> comp
 {
   m_shutdown = m_shutdown || shutdown;
   Supersede(Supersession::STOP);
-  m_nextItem.pItem.reset();
+  {
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    m_nextItem.pItem.reset();
+  }
   ResetPlayer(std::move(completion));
   return !GetInternal();
 }
@@ -110,7 +113,7 @@ bool CApplicationPlayer::PreparePlaybackCleanup()
 {
   if (HasPendingOpen())
     return false;
-  if (IsPlaying() && !m_closingPlayer)
+  if (IsPlaying())
     return true; // Existing nonterminal audio/video cleanup policy stays in Application.
   if (m_cleanupGeneration == m_openGeneration && !m_cleanupPending)
     return false;
@@ -190,11 +193,14 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   {
     // One owned latest intent. Closing the original is never cancelled by a
     // replacement; only the item to open after its retirement may change.
-    m_nextItem.pItem = std::make_shared<CFileItem>(item);
-    m_nextItem.options = options;
-    m_nextItem.playerName = newPlayer;
-    m_nextItem.callback = &callback;
-    m_nextItem.intent = intent;
+    {
+      std::unique_lock<CCriticalSection> lock(m_playerLock);
+      m_nextItem.pItem = std::make_shared<CFileItem>(item);
+      m_nextItem.options = options;
+      m_nextItem.playerName = newPlayer;
+      m_nextItem.callback = &callback;
+      m_nextItem.intent = intent;
+    }
     ResetPlayer();
     return true; // Accepted for the normal main-frame continuation.
   }
@@ -219,7 +225,10 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   m_supersededBy = Supersession::NONE;
   m_supersededAt = intent;
 
-  m_nextItem.pItem.reset();
+  {
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    m_nextItem.pItem.reset();
+  }
 
   // reset caching timers
   m_audioStreamUpdate.SetExpired();
@@ -282,8 +291,12 @@ void CApplicationPlayer::OpenNext(const CPlayerCoreFactory &factory)
   if (m_closingPlayer || m_waitForPlaybackStop || m_shutdown || !m_nextItem.pItem)
     return;
   // Move the full payload before OpenFile can replace it or reset the queue.
-  auto next = std::move(m_nextItem);
-  m_nextItem = {};
+  auto next = [this] {
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    auto taken = std::move(m_nextItem);
+    m_nextItem = {};
+    return taken;
+  }();
   OpenFile(*next.pItem, next.options, factory, next.playerName, *next.callback, next.intent);
 }
 
@@ -369,8 +382,19 @@ bool CApplicationPlayer::IsPaused() const
 
 bool CApplicationPlayer::IsPlaying() const
 {
-  std::shared_ptr<const IPlayer> player = GetInternal();
-  return (player && player->IsPlaying());
+  std::shared_ptr<const IPlayer> player;
+  {
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    // A newer open that waits for the close of the old player continues the
+    // playback, like an open in progress. A stopped player that closes is not
+    // playing: after a stop, the user and the playlist see no playback.
+    if (m_nextItem.pItem)
+      return true;
+    if (m_pPlayer == m_closingPlayer)
+      return false;
+    player = m_pPlayer;
+  }
+  return player && player->IsPlaying();
 }
 
 bool CApplicationPlayer::IsPausedPlayback() const

@@ -423,7 +423,27 @@ int main(){
   PlayOffset({"music","-1"});
   assert(playlist.selected==0);
  }
- std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged; Playlist.PlayOffset\n";
+ // Music that the user queues after a stop starts, also while the close of the
+ // old player waits for the renderer. Music that the user queues while a newer
+ // item waits for the close joins the playlist and does not replace the item.
+ for(bool closed:{false,true}){CApplication app;begin(app);reset();g_playOffsetApp=&app;
+  auto old=app.player.m_pPlayer;old->m_type="remote";old->playing=true;
+  app.StopPlaying();app.Stopped();CServiceBroker::playlist.Terminal(GUI_MSG_PLAYBACK_STOPPED);
+  if(closed){old->canClose=true;app.Frame();}
+  QueueMusic();
+  assert(CServiceBroker::playlist.adds==1&&CServiceBroker::playlist.selected>=0);
+  old->canClose=true;app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer!=old);
+ }
+ {CApplication app;begin(app);reset();g_playOffsetApp=&app;
+  auto old=app.player.m_pPlayer;old->m_type="remote";old->playing=true;
+  CFileItem newer;newer.id=70;assert(app.PlayFile(newer,"old",false,false));assert(app.player.HasPendingOpen());
+  QueueMusic();
+  assert(CServiceBroker::playlist.adds==1&&CServiceBroker::playlist.selected==-1);
+  app.player.OnPlaybackStopped();old->canClose=true;app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==70);
+ }
+ std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged; Playlist.PlayOffset and queue\n";
 }
 """
 
@@ -840,7 +860,7 @@ def compile_run(code, label):
 
 def main():
     source = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
-    signatures = ['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
+    signatures = ['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()', 'bool CApplicationPlayer::IsPlaying() const',
                   'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()',
                   'bool CApplicationPlayer::ClosePlayer(', 'void CApplicationPlayer::OnPlaybackStopped()',
                   'void CApplicationPlayer::OpenNext(', 'void CApplicationPlayer::ResetPlayer(',
@@ -855,7 +875,11 @@ def main():
     playlist = (ROOT / 'xbmc/PlayListPlayer.cpp').read_text()
     frame = function(application, 'void CApplication::FrameMove(')
     code = PRELUDE + '\n'.join(function(source, s) for s in signatures) + HARNESS + TESTS
-    builtin = function((ROOT / 'xbmc/interfaces/builtins/PlayerBuiltins.cpp').read_text(), 'static int PlayOffset(')
+    builtins = (ROOT / 'xbmc/interfaces/builtins/PlayerBuiltins.cpp').read_text()
+    builtin = function(builtins, 'static int PlayOffset(')
+    # The queue branch of PlayMedia: music that the user queues starts when nothing plays.
+    queue = builtins.index('          const int oldSize = playlistPlayer.GetPlaylist(playlistId).size();')
+    queue = builtins[queue:builtins.index('\n        }\n      }', queue)]
     code = code.replace('@CONTINUATION@', frame[frame.index('  const bool openingVideo ='):
                                                  frame.index('  // this will go away')])
     code = code.replace('@CLEANUP@', function(application, 'void CApplication::PlaybackCleanup()'))
@@ -950,12 +974,21 @@ def main():
     assert single.rindex('g_application.EndOpen(intent);') > single.index('PlayMedia(*item')
     # The base program also runs the production Playlist.PlayOffset builtin.
     base = code.replace('bool Play(int,const std::string&,bool);', 'bool Play(int,const std::string&,bool=false);', 1)
+    base = base.replace('int selected=-1;CPlayList list;', 'int adds=0;void Add(int,int){++adds;}void Insert(int,int,int){++adds;}'
+                        'int GetCurrentItemIdx(){return m_iCurrentSong;}int selected=-1;CPlayList list;', 1)
     base = base.replace('int main(){', """constexpr int LOGERROR=0;
 struct CLog {template<class... A>static void Log(A&&...){}};
 namespace StringUtils {void ToLower(std::string& s){for(auto& c:s)c=std::tolower(c);}}
 static CApplication* g_playOffsetApp;
 #define g_application (*g_playOffsetApp)
 """ + builtin + """
+static void QueueMusic(){
+  auto& playlistPlayer=CServiceBroker::GetPlaylistPlayer();
+  const auto& components=CServiceBroker::GetAppComponents();
+  int playlistId=TYPE_MUSIC,items=1,playOffset=0;
+  bool containsMusic=true,playNext=false,hasPlayOffset=false;
+""" + queue + """
+}
 #undef g_application
 int main(){""", 1)
     compile_run(base, '')

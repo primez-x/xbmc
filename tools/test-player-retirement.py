@@ -37,7 +37,7 @@ struct IPlayer {
   bool playing=false,canClose=false;int closes=0,opens=0,lastItem=-1;
   CCriticalSection* applicationLock=nullptr;int* destroyed=nullptr;
   ~IPlayer(){assert(!applicationLock||!applicationLock->held);if(destroyed)++*destroyed;}
-  bool IsPlaying(){return playing;}
+  bool IsPlaying()const{return playing;}
   bool CloseFile(bool=false){++closes;return canClose;}
   // A backend that processes messages during the open (UPnP) runs duringOpen.
   std::function<void()> duringOpen;
@@ -50,7 +50,7 @@ struct CPlayerCoreFactory {
 };
 struct Timer {int expires=0;void SetExpired(){++expires;}};
 struct CApplicationPlayer {
-  CCriticalSection m_playerLock;
+  mutable CCriticalSection m_playerLock;
   std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
   bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
@@ -69,7 +69,7 @@ struct CApplicationPlayer {
   int created=0;
   // The type and the open hook of the next created player
   std::string createdType="video";std::function<void()> createdDuringOpen;
-  std::shared_ptr<IPlayer> GetInternal();
+  std::shared_ptr<IPlayer> GetInternal();std::shared_ptr<const IPlayer> GetInternal()const{return m_pPlayer;}
   bool HasPlayer() {return bool(GetInternal());}
   bool ClosePlayer(bool=false,std::shared_ptr<CEvent> = {});void ResetPlayer(std::shared_ptr<CEvent> = {});void ContinueClose();void OnPlaybackStopped();void CompleteCloseCompletions();
   void OpenNext(const CPlayerCoreFactory&);
@@ -95,7 +95,7 @@ CONTROLS_PLAYER = '''
   void SetMute(bool){++controls;}void SetVolume(float){++controls;}bool OnAction(const CAction&){++controls;return true;}'''
 CONTROLS_ROUTER = '''
   std::shared_ptr<IPlayer> GetControllable();
-  bool IsPlayingAudio()const{return false;}bool IsPlayingVideo()const{return m_pPlayer&&m_pPlayer->playing;}
+  bool IsPlaying()const;bool IsPlayingAudio()const{return false;}bool IsPlayingVideo()const{return IsPlaying();}
   int64_t GetTime()const{return 0;}
   void Pause();void Seek(bool,bool=false,bool=false);void SeekPercentage(float);int SeekChapter(int);
   bool SeekScene(bool);void SeekTime(int64_t);void SeekTimeRelative(int64_t);void SetSpeed(float);
@@ -131,7 +131,30 @@ static void controls_during_close(){
   all();
   assert(current->controls==14&&old->controls==14);
 }
+// A stopped player that closes is not playing. A newer open that waits for the
+// close continues the playback, like an open in progress.
+static void state_during_close(){
+  CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
+  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+  assert(app.IsPlaying());
+  app.m_waitForPlaybackStop=true;
+  assert(!app.ClosePlayer());
+  assert(app.GetInternal()==old&&old->playing&&!app.IsPlaying());
+  CFileItem newer;newer.id=2;
+  assert(app.OpenFile(newer,options,factory,"new",callback));
+  assert(app.m_nextItem.pItem&&app.IsPlaying());
+  old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->lastItem==2&&app.IsPlaying());
+  // a stop that ends the pending open leaves nothing playing
+  current->canClose=false;CFileItem latest;latest.id=3;
+  assert(app.OpenFile(latest,options,factory,"other",callback));
+  assert(app.m_nextItem.pItem&&app.IsPlaying());
+  assert(!app.ClosePlayer());
+  assert(!app.m_nextItem.pItem&&!app.IsPlaying());
+}
 int main(){
+  state_during_close();
   controls_during_close();
   shutdown_cases();
   discarded_notifications();
@@ -226,7 +249,8 @@ def main():
         'void CApplicationPlayer::SetSpeed(', 'void CApplicationPlayer::SetPlaySpeed(',
         'void CApplicationPlayer::SetTempo(', 'void CApplicationPlayer::FrameAdvance(',
         'void CApplicationPlayer::SetMute(', 'void CApplicationPlayer::SetVolume(',
-        'bool CApplicationPlayer::OnAction(', 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()']) + TESTS
+        'bool CApplicationPlayer::OnAction(', 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()',
+        'bool CApplicationPlayer::IsPlaying() const']) + TESTS
     # The playback controls of the router and the players; other harnesses share the prelude.
     for anchor, stubs in (('struct IPlayer {', 'struct CAction {int GetID()const{return 0;}};\nstruct IPlayer {' + CONTROLS_PLAYER),
                           ('  bool HasPlayer() {return bool(GetInternal());}', '  bool HasPlayer() {return bool(GetInternal());}' + CONTROLS_ROUTER)):

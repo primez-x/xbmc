@@ -158,7 +158,8 @@ static void reply_cases(){
   else {CFileItem next;next.id=99;app.player.OpenFile(next,{},app.services.factory,"new",app.callback);}
   old->canClose=true;app.player.ContinueClose();app.PlaybackCleanup();app.player.CompleteCloseCompletions();
   assert(first.wait_for(1s)==std::future_status::ready&&second.wait_for(1s)==std::future_status::ready);
-  assert(!first.get()&&!second.get());
+  // the reply reports the newer open that waits for the close as playback
+  assert(first.get()==!shutdown&&second.get()==!shutdown);
   app.player.OpenNext(app.services.factory);
   assert(app.player.created==(shutdown?0:1));
   if(!shutdown)assert(app.player.m_pPlayer->lastItem==99);
@@ -222,7 +223,7 @@ def build():
     prelude=prelude.replace('  ~IPlayer(){', '  std::function<void()> onDestroy;\n  ~IPlayer(){if(onDestroy)onDestroy();')
     application=source('xbmc/application/Application.cpp')
     player=source('xbmc/application/ApplicationPlayer.cpp')
-    methods=['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
+    methods=['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()', 'bool CApplicationPlayer::IsPlaying() const',
              'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
              'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
              'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(',
