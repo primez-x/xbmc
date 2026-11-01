@@ -244,6 +244,7 @@ public:
 private:
   std::shared_ptr<const IPlayer> GetInternal() const;
   std::shared_ptr<IPlayer> GetInternal();
+  std::shared_ptr<IPlayer> GetControllable();
   void CreatePlayer(const CPlayerCoreFactory &factory, const std::string &player, IPlayerCallback& callback);
   void ContinueClose();
 

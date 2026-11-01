@@ -36,6 +36,14 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()
   return m_pPlayer;
 }
 
+std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()
+{
+  // The user stopped a closing player: a control would resume, pause or seek the
+  // stopped item, and a remote renderer would play the item again.
+  std::unique_lock<CCriticalSection> lock(m_playerLock);
+  return m_pPlayer == m_closingPlayer ? nullptr : m_pPlayer;
+}
+
 bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> completion)
 {
   m_shutdown = m_shutdown || shutdown;
@@ -49,7 +57,8 @@ void CApplicationPlayer::ResetPlayer(std::shared_ptr<CEvent> completion)
 {
   if (!m_closingPlayer)
   {
-    m_closingPlayer = GetInternal();
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    m_closingPlayer = m_pPlayer;
     m_closeAcknowledged = false;
   }
   // Attach the reply before close/destruction can reenter with another player.
@@ -77,8 +86,8 @@ void CApplicationPlayer::ContinueClose()
     std::unique_lock<CCriticalSection> lock(m_playerLock);
     if (m_pPlayer == original)
       m_pPlayer.reset();
+    m_closingPlayer.reset();
   }
-  m_closingPlayer.reset();
   // Move replies before destruction, which can reenter and start another close.
   auto completions = std::move(m_closeCompletionEvents);
   m_closeCompletionEvents.clear();
@@ -391,7 +400,7 @@ bool CApplicationPlayer::IsPlayingRDS() const
 
 void CApplicationPlayer::Pause()
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
   {
     player->Pause();
@@ -400,28 +409,28 @@ void CApplicationPlayer::Pause()
 
 void CApplicationPlayer::SetMute(bool bOnOff)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SetMute(bOnOff);
 }
 
 void CApplicationPlayer::SetVolume(float volume)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SetVolume(volume);
 }
 
 void CApplicationPlayer::Seek(bool bPlus, bool bLargeStep, bool bChapterOverride)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->Seek(bPlus, bLargeStep, bChapterOverride);
 }
 
 void CApplicationPlayer::SeekPercentage(float fPercent)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SeekPercentage(fPercent);
 }
@@ -440,20 +449,20 @@ bool CApplicationPlayer::CanSeek() const
 
 bool CApplicationPlayer::SeekScene(bool bPlus)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   return (player && player->SeekScene(bPlus));
 }
 
 void CApplicationPlayer::SeekTime(int64_t iTime)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SeekTime(iTime);
 }
 
 void CApplicationPlayer::SeekTimeRelative(int64_t iTime)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
   {
     // use relative seeking if implemented by player
@@ -638,21 +647,21 @@ float CApplicationPlayer::GetCachePercentage() const
 
 void CApplicationPlayer::SetSpeed(float speed)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SetSpeed(speed);
 }
 
 void CApplicationPlayer::SetTempo(float tempo)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->SetTempo(tempo);
 }
 
 void CApplicationPlayer::FrameAdvance(int frames)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     player->FrameAdvance(frames);
 }
@@ -726,7 +735,7 @@ int CApplicationPlayer::GetProgramsCount() const
 
 bool CApplicationPlayer::OnAction(const CAction &action)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   return (player && player->OnAction(action));
 }
 
@@ -887,7 +896,7 @@ void CApplicationPlayer::GetSubtitleCapabilities(std::vector<int>& subCaps) cons
 
 int  CApplicationPlayer::SeekChapter(int iChapter)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (player)
     return player->SeekChapter(iChapter);
   else
@@ -896,7 +905,7 @@ int  CApplicationPlayer::SeekChapter(int iChapter)
 
 void CApplicationPlayer::SetPlaySpeed(float speed)
 {
-  std::shared_ptr<IPlayer> player = GetInternal();
+  std::shared_ptr<IPlayer> player = GetControllable();
   if (!player)
     return;
 

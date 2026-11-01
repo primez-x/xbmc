@@ -85,12 +85,54 @@ struct CApplicationPlayer {
   }
 };
 '''
+# A control of a stopped item resumes, pauses or seeks the item.
+CONTROLS_PLAYER = '''
+  int controls=0;
+  void Pause(){++controls;}void Seek(bool,bool,bool){++controls;}void SeekPercentage(float){++controls;}
+  int SeekChapter(int){++controls;return 0;}bool SeekScene(bool){++controls;return true;}
+  void SeekTime(int64_t){++controls;}bool SeekTimeRelative(int64_t){++controls;return true;}
+  void SetSpeed(float){++controls;}void SetTempo(float){++controls;}void FrameAdvance(int){++controls;}
+  void SetMute(bool){++controls;}void SetVolume(float){++controls;}bool OnAction(const CAction&){++controls;return true;}'''
+CONTROLS_ROUTER = '''
+  std::shared_ptr<IPlayer> GetControllable();
+  bool IsPlayingAudio()const{return false;}bool IsPlayingVideo()const{return m_pPlayer&&m_pPlayer->playing;}
+  int64_t GetTime()const{return 0;}
+  void Pause();void Seek(bool,bool=false,bool=false);void SeekPercentage(float);int SeekChapter(int);
+  bool SeekScene(bool);void SeekTime(int64_t);void SeekTimeRelative(int64_t);void SetSpeed(float);
+  void SetPlaySpeed(float);void SetTempo(float);void FrameAdvance(int);void SetMute(bool);
+  void SetVolume(float);bool OnAction(const CAction&);'''
 # The inline intent predicates are the production ones.
 HEADER = (ROOT / 'xbmc/application/ApplicationPlayer.h').read_text()
 PRELUDE = PRELUDE.replace('@INLINE_INTENTS@', HEADER[HEADER.index('  void CancelOpens()'):
                                                       HEADER.index('  // The player plays the video item')])
 TESTS = r'''
+// The user stopped a closing player: no playback control reaches the player, also
+// the speed reset of a newer open, until the close completes. A control before
+// the stop reaches the player.
+static void controls_during_close(){
+  CFileItem file;file.id=1;CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
+  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+  const auto all=[&]{app.Pause();app.Seek(true);app.SeekPercentage(50);app.SeekChapter(2);app.SeekScene(true);
+    app.SeekTime(1000);app.SeekTimeRelative(1000);app.SetPlaySpeed(1);app.SetSpeed(2);app.SetTempo(1.5f);
+    app.FrameAdvance(1);app.SetMute(true);app.SetVolume(0.5f);app.OnAction(CAction{});};
+  all();
+  assert(old->controls==14);
+  app.m_waitForPlaybackStop=true;
+  assert(!app.ClosePlayer());
+  assert(app.m_closingPlayer==old&&app.GetInternal()==old);
+  all();
+  CFileItem newer;newer.id=2;
+  assert(app.OpenFile(newer,options,factory,"new",callback));
+  all();
+  assert(old->controls==14);
+  old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->lastItem==2);
+  all();
+  assert(current->controls==14&&old->controls==14);
+}
 int main(){
+  controls_during_close();
   shutdown_cases();
   discarded_notifications();
   CFileItem file;file.id=1;CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
@@ -177,7 +219,19 @@ def main():
         'void CApplicationPlayer::ContinueClose()', 'void CApplicationPlayer::CompleteCloseCompletions()', 'bool CApplicationPlayer::ClosePlayer(',
         'void CApplicationPlayer::OnPlaybackStopped()', 'void CApplicationPlayer::OpenNext(',
         'void CApplicationPlayer::ResetPlayer(', 'bool CApplicationPlayer::OpenFile(',
-        'void CApplicationPlayer::Supersede(']) + TESTS
+        'void CApplicationPlayer::Supersede(', 'void CApplicationPlayer::Pause()',
+        'void CApplicationPlayer::Seek(bool', 'void CApplicationPlayer::SeekPercentage(',
+        'int  CApplicationPlayer::SeekChapter(', 'bool CApplicationPlayer::SeekScene(',
+        'void CApplicationPlayer::SeekTime(', 'void CApplicationPlayer::SeekTimeRelative(',
+        'void CApplicationPlayer::SetSpeed(', 'void CApplicationPlayer::SetPlaySpeed(',
+        'void CApplicationPlayer::SetTempo(', 'void CApplicationPlayer::FrameAdvance(',
+        'void CApplicationPlayer::SetMute(', 'void CApplicationPlayer::SetVolume(',
+        'bool CApplicationPlayer::OnAction(', 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()']) + TESTS
+    # The playback controls of the router and the players; other harnesses share the prelude.
+    for anchor, stubs in (('struct IPlayer {', 'struct CAction {int GetID()const{return 0;}};\nstruct IPlayer {' + CONTROLS_PLAYER),
+                          ('  bool HasPlayer() {return bool(GetInternal());}', '  bool HasPlayer() {return bool(GetInternal());}' + CONTROLS_ROUTER)):
+        assert code.count(anchor) == 1, anchor
+        code = code.replace(anchor, stubs, 1)
     # Main-frame retry and shutdown order are source wiring checks, not a full
     # Application runtime. The management methods above execute real bodies.
     application = (ROOT / 'xbmc/application/Application.cpp').read_text()
