@@ -9,8 +9,8 @@ the achievements. The router closes the player each frame until the close
 completes, and opens the newer item after the close completes. The open owns
 the item until the open returns: a close during the open (also from another
 thread) cancels the open and completes only after the open released the item.
-The game clients are shared (the add-on cache), so the newer game uses the game
-client after the retired open released the game client. The close of a player
+The game clients (the add-on cache) and the agent input are shared, so the
+newer game uses them after the retired open released them. The close of a player
 reports the end only of a started game, and a close without an open item
 changes nothing: the retired player reports no end that stops the newer item,
 and the close in the destructor of the retired player keeps the render
@@ -47,6 +47,8 @@ enum {SELECTION,INITIALIZE,GAME_OPEN,SAVESTATE_QUESTION,ACHIEVEMENTS,PLAYBACK,ST
 static int waitStep=-1;static std::function<void()> waitHook;
 static void Wait(int step){if(step==waitStep&&waitHook)std::exchange(waitHook,nullptr)();}
 static int savestates=0,questions=0;
+// The agent input of the games is shared, also between different game clients.
+static int agentInputs=0;
 struct CGUIDialogYesNo {template<class... A> static bool ShowAndGetInput(A&&...){
  ++questions;Wait(SAVESTATE_QUESTION);return savestateDialog?std::exchange(savestateDialog,nullptr)():true;}};
 struct GameTag {std::string GetGameClient()const{return "game.test";}};
@@ -59,7 +61,7 @@ struct GameSettings {bool AutosaveEnabled(){return false;} std::string GetRAUser
  std::string GetRAToken(){return {};}};
 struct GameServices {::GameSettings& GameSettings(){static ::GameSettings s;return s;}};
 struct Dummy {template<class... A> explicit Dummy(A&&...){} Dummy()=default;void ResetInfo(){}
- void SetDataCache(void*){} void SetVideoFps(float){} void StartAgentManager(){} void StopAgentManager(){}
+ void SetDataCache(void*){} void SetVideoFps(float){} void StartAgentManager(){++agentInputs;} void StopAgentManager(){--agentInputs;}
  std::string CreateSavestate(bool){++savestates;return {};} void EnableRichPresence(){Wait(ACHIEVEMENTS);} };
 struct CRPProcessInfo: Dummy {static std::unique_ptr<CRPProcessInfo> CreateInstance(){return std::make_unique<CRPProcessInfo>();}};
 using CGUIGameMessenger=Dummy;using CRPRenderManager=Dummy;using CRPStreamManager=Dummy;
@@ -107,7 +109,7 @@ struct CRetroPlayer {
 '''
 
 MAIN = r'''
-static void reset(){gameOpens=gameCloses=savestates=questions=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
+static void reset(){gameOpens=gameCloses=savestates=questions=agentInputs=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
  startedHook=nullptr;CachedClient()=std::make_shared<CGameClient>();CServiceBroker::GetAppMessenger()->fullscreen=0;}
 int main(){
  // A newer item retires the player during each step of the open that can wait
@@ -125,7 +127,7 @@ int main(){
    otherClientSave=true;
    if(started)startedHook=[&]{close();};else{waitStep=step;waitHook=[&]{close();close();};}
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{}));
-   assert(closes==(started?1:2)&&player.CloseFile());
+   assert(closes==(started?1:2)&&player.CloseFile()&&agentInputs==0);
    assert(cb.started==started&&cb.ended==started&&!player.IsPlaying()&&savestates==0);
    assert(!player.m_gameClient&&!player.m_processInfo&&!player.m_playback&&!player.m_input);
    assert(gameCloses==(step==SELECTION?0:1)&&CServiceBroker::GetAppMessenger()->fullscreen==started);
@@ -181,20 +183,20 @@ static CGUIGameRenderManager sharedRenderer;
 RENDER_MAIN = r'''
 int main(){
  for(int step=0;step<STEPS;++step){
-  Callback oldCb,newCb;savestates=0;CachedClient()=std::make_shared<CGameClient>();
+  Callback oldCb,newCb;savestates=agentInputs=0;CachedClient()=std::make_shared<CGameClient>();
   auto old=std::make_unique<CRetroPlayer>(oldCb);
   auto newer=std::make_unique<CRetroPlayer>(newCb);
   CGUIRenderHandle handle;
   sharedRenderer.m_renderTargets.emplace(&handle,nullptr);
   otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;waitHook=[&]{assert(!old->CloseFile());};
   assert(!old->OpenFile(CFileItem{},CPlayerOptions{}));
-  assert(old->CloseFile());
+  assert(old->CloseFile()&&agentInputs==0);
   otherClientSave=false;
   assert(newer->OpenFile(CFileItem{},CPlayerOptions{}));
   assert(sharedRenderer.m_gameCallback==newer.get()&&sharedRenderer.m_renderTargets.at(&handle));
   old.reset();
   assert(oldCb.started==0&&oldCb.ended==0&&savestates==0);
-  assert(newer->IsPlaying()&&CachedClient()->loaded&&newCb.started==1&&newCb.ended==0);
+  assert(newer->IsPlaying()&&CachedClient()->loaded&&agentInputs==1&&newCb.started==1&&newCb.ended==0);
   assert(sharedRenderer.IsPlayingGame()&&sharedRenderer.m_gameCallback==newer.get());
   assert(sharedRenderer.m_renderTargets.at(&handle));
   newer.reset();
