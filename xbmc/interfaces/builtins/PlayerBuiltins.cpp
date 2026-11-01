@@ -71,6 +71,7 @@ static int PlayOffset(const std::vector<std::string>& params)
   std::string strPos = params[0];
   std::string paramlow(params[0]);
   StringUtils::ToLower(paramlow);
+  bool switched = false;
   if (params.size() > 1)
   {
     // ignore any other parameters if present
@@ -96,6 +97,7 @@ static int PlayOffset(const std::vector<std::string>& params)
       g_application.StopPlaying();
       CServiceBroker::GetPlaylistPlayer().Reset();
       CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(playlistId);
+      switched = true;
     }
   }
   // play the desired offset
@@ -104,9 +106,10 @@ static int PlayOffset(const std::vector<std::string>& params)
   const auto& components = CServiceBroker::GetAppComponents();
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
   // playlist is already playing
-  if (appPlayer->IsPlaying())
+  if (!switched && appPlayer->IsPlaying())
     CServiceBroker::GetPlaylistPlayer().PlayNext(pos);
-  // we start playing the 'other' playlist so we need to use play to initialize the player state
+  // we start playing the 'other' playlist so we need to use play to initialize the player state.
+  // The close of the old player can still run after the stop, so the switch decides.
   else
     CServiceBroker::GetPlaylistPlayer().Play(pos, "");
 

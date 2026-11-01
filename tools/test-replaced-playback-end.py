@@ -406,7 +406,24 @@ int main(){
   CFileItem later;later.id=61;assert(app.PlayFile(later,"old",false,false));
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==61);
  }
- std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged\n";
+ // Playlist.PlayOffset of the other playlist stops the playback and starts the
+ // other playlist at the offset, also while the close of the old player waits
+ // for the renderer: the switch resets the position, so the offset is absolute.
+ for(int offset:{0,1})for(bool remote:{false,true}){CApplication app;begin(app);g_playOffsetApp=&app;
+  auto old=app.player.m_pPlayer;old->m_type=remote?"remote":"video";old->playing=true;old->hasVideo=true;
+  auto& playlist=CServiceBroker::playlist;playlist.m_iCurrentPlayList=TYPE_VIDEO;playlist.m_iCurrentSong=0;
+  PlayOffset({"music",std::to_string(offset)});
+  assert(playlist.GetCurrentPlaylist()==TYPE_MUSIC&&playlist.selected==offset&&app.player.HasPendingOpen());
+  old->canClose=true;app.Stopped();app.Frame();
+  assert(app.player.IsPlaying()&&app.player.m_pPlayer!=old&&playlist.selected==offset);
+ }
+ // An offset in the current playlist stays relative to the playing item.
+ {CApplication app;begin(app);g_playOffsetApp=&app;app.player.m_pPlayer->playing=true;
+  auto& playlist=CServiceBroker::playlist;playlist.m_iCurrentPlayList=TYPE_MUSIC;playlist.m_iCurrentSong=1;
+  PlayOffset({"music","-1"});
+  assert(playlist.selected==0);
+ }
+ std::cout<<"PASS replaced playback end and stop keep the newer open; standalone opens end the playlist; a stop supersedes a late end; normal end, stack and explicit stop unchanged; Playlist.PlayOffset\n";
 }
 """
 
@@ -838,6 +855,7 @@ def main():
     playlist = (ROOT / 'xbmc/PlayListPlayer.cpp').read_text()
     frame = function(application, 'void CApplication::FrameMove(')
     code = PRELUDE + '\n'.join(function(source, s) for s in signatures) + HARNESS + TESTS
+    builtin = function((ROOT / 'xbmc/interfaces/builtins/PlayerBuiltins.cpp').read_text(), 'static int PlayOffset(')
     code = code.replace('@CONTINUATION@', frame[frame.index('  const bool openingVideo ='):
                                                  frame.index('  // this will go away')])
     code = code.replace('@CLEANUP@', function(application, 'void CApplication::PlaybackCleanup()'))
@@ -930,7 +948,17 @@ def main():
     assert single.index('appPlayer->BeginOpen();') < single.index('GetResolvedPluginResult(*item)')
     assert single.index('!appPlayer->OpenSuperseded(intent)') < single.index('Play(item, pMsg->strParam);')
     assert single.rindex('g_application.EndOpen(intent);') > single.index('PlayMedia(*item')
-    compile_run(code, '')
+    # The base program also runs the production Playlist.PlayOffset builtin.
+    base = code.replace('bool Play(int,const std::string&,bool);', 'bool Play(int,const std::string&,bool=false);', 1)
+    base = base.replace('int main(){', """constexpr int LOGERROR=0;
+struct CLog {template<class... A>static void Log(A&&...){}};
+namespace StringUtils {void ToLower(std::string& s){for(auto& c:s)c=std::tolower(c);}}
+static CApplication* g_playOffsetApp;
+#define g_application (*g_playOffsetApp)
+""" + builtin + """
+#undef g_application
+int main(){""", 1)
+    compile_run(base, '')
     compile_run(production_play(code, playlist, function), '-play')
     compile_run(menu_program(play), '-menu')
     print('PASS production Blu-ray menu: a newer open during the menu supersedes the open, also on cancel')
