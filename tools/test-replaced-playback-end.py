@@ -849,13 +849,13 @@ def menu_program(play):
             .replace('@MENU@', play[menu:play.index('  // this really aught to be inside !bRestart', menu)]))
 
 
-def compile_run(code, label):
+def compile_run(code, label, sanitizer='address,undefined'):
     with tempfile.TemporaryDirectory(prefix='replaced-playback-end-') as tmp:
         out = Path(tmp)
         (out / 'test.cpp').write_text(code)
         if os.environ.get('DUMP'): Path(os.environ['DUMP'] + label).write_text(code)
-        subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+        subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+                        '-fsanitize=' + sanitizer, '-fno-omit-frame-pointer',
                         str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
         subprocess.run([str(out / 'test')], check=True, timeout=15)
 
@@ -1001,6 +1001,116 @@ int main(){
 # thread accepted a newer stack (Astra's round 35 probe). The cleanup of the
 # registrations at a start keeps the registrations of the accepted stack, and
 # the stack seek and the fullscreen condition find the part of the stack.
+# Every reader and writer of the registrations: the player threads (the start and
+# the close callbacks), a job (the save of the file state) and the main thread
+# (the adoption and the initialization of a stack, the fullscreen condition).
+REGISTRATION_ACCESSORS = (
+    'void CApplicationStackHelper::ClearAllRegisteredStackInformation()',
+    'void CApplicationStackHelper::SetRegisteredStack(',
+    'int CApplicationStackHelper::GetRegisteredStackPartNumber(',
+    'void CApplicationStackHelper::SetRegisteredStackPartNumber(',
+    'uint64_t CApplicationStackHelper::GetRegisteredStackPartStartTimeMs(',
+    'void CApplicationStackHelper::SetRegisteredStackPartStartTimeMs(',
+    'uint64_t CApplicationStackHelper::GetRegisteredStackTotalTimeMs(',
+    'void CApplicationStackHelper::SetRegisteredStackTotalTimeMs(',
+    'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const std::string& key)\n{')
+
+
+# A start callback of a player reads and removes registrations while the main
+# thread adopts a newer stack and registers the parts of a stack. The lock of the
+# registrations orders every access (ThreadSanitizer).
+def stack_race_program(function):
+    code = stack_registration_program(function)
+    return code[:code.index('int main(){')] + r"""
+#include <atomic>
+#include <thread>
+int main(){
+ (void)Fullscreen;  // the main thread program checks the condition
+ CApplicationStackHelper current;current.Stage({"a1.mkv","a2.mkv"},1);
+ const CFileItem a1{"a1.mkv"},a2{"a2.mkv"},older{"older.mkv"};
+ // The threads take turns through a relaxed counter, which orders nothing for
+ // ThreadSanitizer: only the lock of the registrations orders the accesses, and a
+ // read follows each write.
+ std::atomic<int> turn{0};
+ const auto await=[&](int value){while(turn.load(std::memory_order_relaxed)<value){}};
+ std::thread callback([&]{
+  for(int n=0;n<2000;++n){
+   await(2*n+1);
+   // the start of a part (ApplicationPlayerCallback::OnPlayBackStarted), the close of a part, a job
+   for(const auto* part:{&a1,&a2}){
+    const auto stack=current.GetRegisteredStack(*part);
+    if(stack)assert(!stack->GetPath().empty());
+    current.HasRegisteredStack(*part);
+    current.GetRegisteredStackTotalTimeMs(*part);current.GetRegisteredStackPartStartTimeMs(*part);
+    current.GetRegisteredStackPartNumber(*part);
+   }
+   current.OnPlayBackStarted(n%2?a2:older);
+   turn.store(2*n+2,std::memory_order_relaxed);
+  }});
+ for(int n=0;n<2000;++n){
+  CApplicationStackHelper staged;staged.Stage({"a1.mkv","a2.mkv"},1);
+  current.Adopt(std::move(staged));
+  for(const auto* part:{&a1,&a2}){
+   current.SetRegisteredStack(*part,std::make_shared<CFileItem>(CFileItem{"stack://a1.mkv"}));
+   current.SetRegisteredStackPartNumber(*part,1);current.SetRegisteredStackPartStartTimeMs(*part,n);
+   current.SetRegisteredStackTotalTimeMs(*part,n);
+  }
+  if(n%100==99)current.ClearAllRegisteredStackInformation();
+  turn.store(2*n+1,std::memory_order_relaxed);
+  await(2*n+2);
+ }
+ callback.join();
+}
+"""
+
+
+# The close callback of a part reads the registrations under the lock and saves
+# the state of the item (the database) without the lock: the main thread reads the
+# registrations at the open of the next part and does not wait for the save.
+def close_callback_program(function):
+    code = stack_registration_program(function)
+    callback = (ROOT / 'xbmc/application/ApplicationPlayerCallback.cpp').read_text()
+    close = function(callback, 'void CApplicationPlayerCallback::OnPlayerCloseFile(')
+    return code[:code.index('int main(){')] + r"""
+#include <thread>
+struct CStreamDetails {double duration=0;void SetVideoDuration(int,double d){duration=d;}};
+struct CVideoInfoTag {CStreamDetails m_streamDetails;};
+struct CBookmark {double timeInSeconds=0,totalTimeInSeconds=0;int partNumber=0;};
+struct CPlayedItem: CFileItem {CVideoInfoTag tag;CPlayedItem(const CFileItem& item):CFileItem(item){}
+ bool IsAudio() const {return false;} bool IsVideo() const {return true;} CVideoInfoTag* GetVideoInfoTag(){return &tag;}};
+struct CAdvancedSettings {int m_audioPlayCountMinimumPercent=0,m_videoPlayCountMinimumPercent=90,
+ m_videoIgnorePercentAtEnd=8,m_videoIgnoreSecondsAtStart=180;};
+struct CProfile {bool canWriteDatabases() const {return true;}};
+struct CProfileManager {CProfile profile;const CProfile& GetCurrentProfile() const {return profile;}};
+struct CSettingsComponent {std::shared_ptr<CAdvancedSettings> settings=std::make_shared<CAdvancedSettings>();
+ std::shared_ptr<CAdvancedSettings> GetAdvancedSettings(){return settings;}
+ std::shared_ptr<CProfileManager> GetProfileManager(){static auto m=std::make_shared<CProfileManager>();return m;}};
+struct CAppComponents {std::shared_ptr<CApplicationStackHelper> stack=std::make_shared<CApplicationStackHelper>();
+ template<class T> std::shared_ptr<T> GetComponent() const {return stack;}};
+struct CServiceBroker {static CAppComponents& GetAppComponents(){static CAppComponents c;return c;}
+ static CSettingsComponent* GetSettingsComponent(){static CSettingsComponent c;return &c;}};
+static int saves=0;static CBookmark saved;static std::string savedPath;
+struct CSaveFileState {static void DoWork(const CPlayedItem& item,const CBookmark& bookmark,bool){
+ // the main thread can read the registrations during the save
+ auto& lock=CServiceBroker::GetAppComponents().stack->m_critSection;bool free=false;
+ std::thread main([&]{free=lock.try_lock();if(free)lock.unlock();});main.join();
+ assert(free);++saves;saved=bookmark;savedPath=item.GetPath();}};
+struct CApplicationPlayerCallback {void OnPlayerCloseFile(const CFileItem&,const CBookmark&);};
+""" + close.replace('CFileItem fileItem(file);', 'CPlayedItem fileItem(file);') + r"""
+int main(){
+ (void)Fullscreen;  // the main thread program checks the condition
+ auto& stack=*CServiceBroker::GetAppComponents().stack;stack.Stage({"a1.mkv","a2.mkv"},1);
+ const CFileItem a2{"a2.mkv"};
+ stack.SetRegisteredStackTotalTimeMs(a2,3600000);stack.SetRegisteredStackPartStartTimeMs(a2,1800000);
+ stack.SetRegisteredStackPartNumber(a2,1);
+ CBookmark bookmark;bookmark.timeInSeconds=600;bookmark.totalTimeInSeconds=1800;
+ CApplicationPlayerCallback().OnPlayerCloseFile(a2,bookmark);
+ // the bookmark of a part is a bookmark of the stack
+ assert(saves==1&&savedPath=="stack://a1.mkv"&&saved.timeInSeconds==2400&&saved.totalTimeInSeconds==3600&&saved.partNumber==1);
+}
+"""
+
+
 def stack_registration_program(function):
     stack = (ROOT / 'xbmc/application/ApplicationStackHelper.cpp').read_text()
     application = (ROOT / 'xbmc/application/Application.cpp').read_text()
@@ -1008,13 +1118,34 @@ def stack_registration_program(function):
     condition = condition[:condition.index('\n      options.fullscreen')]
     return r"""#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
-using CCriticalSection=std::recursive_mutex;
+// The lock counts the locks of the thread, and the map of the registrations
+// fails every access of a thread without the lock.
+static thread_local int t_locks=0;
+struct CCriticalSection {
+ std::recursive_mutex mutex;
+ void lock(){mutex.lock();++t_locks;}
+ bool try_lock(){if(!mutex.try_lock())return false;++t_locks;return true;}
+ void unlock(){--t_locks;mutex.unlock();}
+};
+template<class K,class V> struct CheckedMap {
+ std::map<K,V> map;using iterator=typename std::map<K,V>::iterator;
+ static void Check(){assert(t_locks>0&&"a registration access without the lock");}
+ size_t count(const K& key) const {Check();return map.count(key);}
+ V& operator[](const K& key){Check();return map[key];}
+ iterator find(const K& key){Check();return map.find(key);}
+ typename std::map<K,V>::const_iterator find(const K& key) const {Check();return map.find(key);}
+ iterator begin(){Check();return map.begin();} iterator end(){Check();return map.end();}
+ typename std::map<K,V>::const_iterator end() const {Check();return map.end();}
+ iterator erase(iterator it){Check();return map.erase(it);}
+ void clear(){Check();map.clear();} bool empty() const {Check();return map.empty();}
+};
 struct CFileItem {
  std::string path;int offset=0;
  const std::string& GetPath() const {return path;} int GetStartOffset() const {return offset;}
@@ -1027,21 +1158,29 @@ struct CFileItemList {
  {return std::any_of(items.begin(),items.end(),[&](const CFileItem& item){return item.path==path;});}
 };
 struct CApplicationStackHelper {
- struct StackPartInformation {std::shared_ptr<CFileItem> m_pStack;};
+ struct StackPartInformation {uint64_t m_lStackPartStartTimeMs=0;uint64_t m_lStackTotalTimeMs=0;
+  int m_lStackPartNumber=0;std::shared_ptr<CFileItem> m_pStack;};
  using StackPartInformationPtr=std::shared_ptr<StackPartInformation>;
- using Stackmap=std::map<std::string,StackPartInformationPtr>;
- CCriticalSection m_critSection;Stackmap m_stackmap;
+ using Stackmap=CheckedMap<std::string,StackPartInformationPtr>;
+ mutable CCriticalSection m_critSection;Stackmap m_stackmap;
  std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
  int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;
  void Adopt(CApplicationStackHelper&&);void OnPlayBackStarted(const CFileItem&);
  bool HasRegisteredStack(const CFileItem&) const;
  std::shared_ptr<const CFileItem> GetRegisteredStack(const CFileItem&) const;
+ void ClearAllRegisteredStackInformation();
+ void SetRegisteredStack(const CFileItem&,std::shared_ptr<CFileItem>);
+ int GetRegisteredStackPartNumber(const CFileItem&);void SetRegisteredStackPartNumber(const CFileItem&,int);
+ uint64_t GetRegisteredStackPartStartTimeMs(const CFileItem&) const;void SetRegisteredStackPartStartTimeMs(const CFileItem&,uint64_t);
+ uint64_t GetRegisteredStackTotalTimeMs(const CFileItem&) const;void SetRegisteredStackTotalTimeMs(const CFileItem&,uint64_t);
+ StackPartInformationPtr GetStackPartInformation(const std::string&);
  StackPartInformationPtr GetStackPartInformation(const std::string&) const;
  bool IsPlayingRegularStack() const;int GetCurrentPartNumber() const {return m_currentStackPosition;}
  void Clear(){m_currentStackPosition=0;m_currentStack->Clear();}
  // a stack with the parts of the paths, resumed at a part
  void Stage(const std::vector<std::string>& paths,int position)
- {auto item=std::make_shared<CFileItem>(CFileItem{"stack://"+paths[0]});
+ {std::unique_lock<CCriticalSection> lock(m_critSection);
+  auto item=std::make_shared<CFileItem>(CFileItem{"stack://"+paths[0]});
   for(const auto& path:paths){m_currentStack->items.push_back({path});
    m_stackmap[path]=std::make_shared<StackPartInformation>();m_stackmap[path]->m_pStack=item;}
   m_currentStackPosition=position;}
@@ -1057,7 +1196,7 @@ static bool Fullscreen(const CApplicationStackHelper* stack,const CFileItem& ite
         'bool CApplicationStackHelper::HasRegisteredStack(',
         'std::shared_ptr<const CFileItem> CApplicationStackHelper::GetRegisteredStack(',
         'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const std::string& key) const',
-        'bool CApplicationStackHelper::IsPlayingRegularStack() const')) + r"""
+        'bool CApplicationStackHelper::IsPlayingRegularStack() const') + REGISTRATION_ACCESSORS) + r"""
 int main(){
  CFileItem older{"older.mkv"},a2{"a2.mkv"},b1{"b1.mkv"},b2{"b2.mkv"};
  for(int startedItem=0;startedItem<2;++startedItem){
@@ -1077,6 +1216,7 @@ int main(){
   assert(current.GetRegisteredStack(b2)==stackB&&current.GetRegisteredStack(b1)==stackB&&!current.HasRegisteredStack(a2));
   // a single video replaces the stack: the start of the video removes every registration
   current.Clear();current.OnPlayBackStarted(older);
+  std::unique_lock<CCriticalSection> lock(current.m_critSection);
   assert(current.m_stackmap.empty());
  }
 }
@@ -1260,9 +1400,16 @@ int main(){""", 1)
     compile_run(menu_program(play), '-menu')
     compile_run(stack_adopt_program(function), '-adopt')
     compile_run(stack_registration_program(function), '-registrations')
+    # The lock of the registrations is the lock of the start callback and of the close callback.
+    header = (ROOT / 'xbmc/application/ApplicationStackHelper.h').read_text()
+    assert 'mutable CCriticalSection m_critSection;' in header, 'const readers of the registrations need the lock'
+    compile_run(stack_race_program(function), '-registration-race', 'thread')
+    compile_run(close_callback_program(function), '-close-callback')
     print('PASS production Blu-ray menu: a newer open during the menu supersedes the open, also on cancel')
     print('PASS production stack adoption: a reader on another thread keeps the list of the current stack')
     print('PASS production stack registrations: the start of an older item keeps the registrations of the accepted stack')
+    print('PASS production stack registration lock: the callbacks and the main thread access the registrations under the lock (ThreadSanitizer)')
+    print('PASS production close callback: the bookmark of a part is a bookmark of the stack, and the save runs without the lock of the registrations')
 
 
 if __name__ == '__main__':

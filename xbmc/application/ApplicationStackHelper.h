@@ -181,7 +181,9 @@ public:
   */
   void SetRegisteredStackTotalTimeMs(const CFileItem& item, uint64_t totalTimeMs);
 
-  CCriticalSection m_critSection;
+  // Orders the registrations: the player threads (the start and the close of an
+  // item), the jobs and the main thread read and change the registrations.
+  mutable CCriticalSection m_critSection;
 
 protected:
   /*!
