@@ -316,8 +316,10 @@ void CRetroPlayer::CloseItem()
 
   m_cheevos.reset();
 
+  // A game that never started saves nothing: the in-game saves of the game have
+  // no game client in the path, and a cancelled open must not change them.
   if (m_gameClient)
-    m_gameClient->CloseFile();
+    m_gameClient->CloseFile(started);
 
   m_input.reset();
 

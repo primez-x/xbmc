@@ -70,13 +70,13 @@ struct Dummy {template<class... A> explicit Dummy(A&&...){} Dummy()=default;void
 struct CRPProcessInfo: Dummy {static std::unique_ptr<CRPProcessInfo> CreateInstance(){return std::make_unique<CRPProcessInfo>();}};
 using CGUIGameMessenger=Dummy;using CRPRenderManager=Dummy;using CRPStreamManager=Dummy;
 using CRetroPlayerInput=Dummy;using CCheevos=Dummy;using CGUIPlaybackControl=Dummy;using CRetroPlayerAutoSave=Dummy;
-static int gameOpens=0,gameCloses=0;static bool initializeFails=false,gameOpenFails=false;
+static int gameOpens=0,gameCloses=0,gameSaves=0;static bool initializeFails=false,gameOpenFails=false;
 struct CGameClient {bool playing=false,loaded=false;bool Initialize(){Wait(INITIALIZE);loaded=true;return !initializeFails;}
  template<class... A> bool OpenFile(A&&...){Wait(GAME_OPEN);if(gameOpenFails)return false;++gameOpens;playing=true;return true;}
  template<class... A> bool OpenStandalone(A&&...){++gameOpens;playing=true;return true;}
  std::string ID(){return "game.test";}std::string Name(){return "test";}float GetFrameRate(){return 60;}
  // like the production close, a close of a game that is not playing does nothing
- void CloseFile(){if(playing)++gameCloses;playing=false;}void Unload(){loaded=false;playing=false;}
+ void CloseFile(bool saveGame){if(playing){++gameCloses;gameSaves+=saveGame;}playing=false;}void Unload(){loaded=false;playing=false;}
 };
 // The add-on manager returns the one cached game client of an add-on to every player.
 static std::shared_ptr<CGameClient>& CachedClient(){static auto client=std::make_shared<CGameClient>();return client;}
@@ -114,7 +114,7 @@ struct CRetroPlayer {
 '''
 
 MAIN = r'''
-static void reset(){gameOpens=gameCloses=savestates=questions=agentInputs=0;otherClientSave=initializeFails=gameOpenFails=false;waitStep=-1;waitHook=nullptr;
+static void reset(){gameOpens=gameCloses=gameSaves=savestates=questions=agentInputs=0;otherClientSave=initializeFails=gameOpenFails=false;waitStep=-1;waitHook=nullptr;
  startedHook=nullptr;CachedClient()=std::make_shared<CGameClient>();CServiceBroker::GetAppMessenger()->fullscreen=0;}
 int main(){
  // A newer item retires the player during each step of the open that can wait
@@ -136,6 +136,8 @@ int main(){
    assert(cb.started==started&&cb.ended==started&&!player.IsPlaying()&&savestates==0);
    assert(!player.m_gameClient&&!player.m_processInfo&&!player.m_playback&&!player.m_input);
    assert(gameCloses==(step==SELECTION?0:1)&&CServiceBroker::GetAppMessenger()->fullscreen==started);
+   // only a started game keeps the progress of the game (the in-game saves)
+   assert(gameSaves==started);
    // A cancelled open asks no question
    assert(questions==(step>=SAVESTATE_QUESTION));
   }
@@ -146,7 +148,7 @@ int main(){
  {reset();Callback cb;
   {CRetroPlayer player(cb);
    assert(player.OpenFile(CFileItem{},CPlayerOptions{})&&cb.started==1&&player.IsPlaying());
-   assert(player.CloseFile()&&cb.ended==1&&!player.IsPlaying()&&gameCloses==1&&!player.m_gameClient);
+   assert(player.CloseFile()&&cb.ended==1&&!player.IsPlaying()&&gameCloses==1&&gameSaves==1&&!player.m_gameClient);
    assert(player.CloseFile()&&cb.ended==1);
   }
   assert(cb.ended==1);
@@ -163,7 +165,7 @@ int main(){
    else if(failure==2)gameOpenFails=true;
    else initializeFails=true;
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{})&&cb.started==0&&cb.ended==0);
-   assert(agentInputs==0&&gameCloses==gameOpens&&!CachedClient()->playing&&!CachedClient()->loaded);
+   assert(agentInputs==0&&gameCloses==gameOpens&&gameSaves==0&&!CachedClient()->playing&&!CachedClient()->loaded);
    assert(!player.m_gameClient&&!player.m_input&&!player.m_processInfo);
    assert(player.CloseFile());
   }
@@ -328,6 +330,45 @@ int main(){
 '''
 
 
+# The close of the game client releases the game; only a close that keeps the
+# progress saves the in-game saves (SRAM, RTC), whose path has no game client.
+GAME_CLIENT = r'''
+#include <cassert>
+#include <memory>
+#include <mutex>
+#include <string>
+struct CCriticalSection : std::recursive_mutex {};
+static int sramSaves=0,unloads=0,inputStops=0,streamResets=0;
+struct CGameClientInGameSaves {void Save(){++sramSaves;}};
+struct Input {void Stop(){++inputStops;}};
+struct Streams {void Deinitialize(){++streamResets;}};
+struct ToAddon {int UnloadGame(void*){++unloads;return 0;}};
+struct Game {ToAddon* toAddon;};
+struct Ifc {Game* game;};
+struct CGameClient {
+ CCriticalSection m_critSection;bool m_bIsPlaying=true;std::unique_ptr<CGameClientInGameSaves> m_inGameSaves;
+ std::string m_gamePath="rom.sfc";size_t m_serializeSize=1;void* m_input=this;Ifc m_ifc;
+ ::Input input;::Streams streams;::Input& Input(){return input;} ::Streams& Streams(){return streams;}
+ void LogError(int,const char*){} void LogException(const char*){}
+ void CloseFile(bool saveGame);
+};
+@CLOSE@
+int main(){
+ ToAddon addon;Game game{&addon};
+ for(int save=0;save<2;++save){
+  sramSaves=unloads=inputStops=streamResets=0;
+  CGameClient client;client.m_ifc.game=&game;client.m_inGameSaves=std::make_unique<CGameClientInGameSaves>();
+  client.CloseFile(save);
+  // the close always releases the game
+  assert(!client.m_bIsPlaying&&!client.m_inGameSaves&&client.m_gamePath.empty()&&unloads==1&&inputStops==1&&streamResets==1);
+  assert(sramSaves==save);
+  client.CloseFile(true);  // a second close does nothing
+  assert(unloads==1&&sramSaves==save);
+ }
+}
+'''
+
+
 def compile_run(code):
     with tempfile.TemporaryDirectory(prefix='retroplayer-open-close-') as tmp:
         out = Path(tmp)
@@ -402,6 +443,8 @@ def main():
                                 '{static Window w;return &w;}', 1)
     stopping = stopping.replace('struct Messenger {int fullscreen=0;', 'struct Messenger {bool IsProcessThread(){return true;} int fullscreen=0;', 1)
     compile_run(stopping + player + shutdown)
+    client = function((ROOT / 'xbmc/games/addons/GameClient.cpp').read_text(), 'void CGameClient::CloseFile(')
+    compile_run(GAME_CLIENT.replace('@CLOSE@', client))
     print('RetroPlayer open/close: PASS (production OpenFile, CloseFile and render registration; ASan/UBSan)')
 
 
