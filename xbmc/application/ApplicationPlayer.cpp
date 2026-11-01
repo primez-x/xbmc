@@ -10,6 +10,8 @@
 
 #include "FileItem.h"
 #include "ServiceBroker.h"
+#include "application/ApplicationComponents.h"
+#include "application/ApplicationVolumeHandling.h"
 #include "cores/DataCacheCore.h"
 #include "cores/IPlayer.h"
 #include "cores/VideoPlayer/VideoPlayer.h"
@@ -236,6 +238,16 @@ bool CApplicationPlayer::OpenFile(const CFileItem& item, const CPlayerOptions& o
   m_audioStreamUpdate.SetExpired();
   m_videoStreamUpdate.SetExpired();
   m_subtitleStreamUpdate.SetExpired();
+
+  // The opened player plays at the volume of the application, also the player of
+  // a newer item that waited for the close of the old player (OpenNext).
+  if (ret)
+  {
+    const auto appVolume =
+        CServiceBroker::GetAppComponents().GetComponent<CApplicationVolumeHandling>();
+    player->SetVolume(appVolume->GetVolumeRatio());
+    player->SetMute(appVolume->IsMuted());
+  }
 
   return ret;
 }

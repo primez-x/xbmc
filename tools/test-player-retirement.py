@@ -12,7 +12,15 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-function = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['function']
+splice = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['function']
+
+
+def function(source, signature):
+    # The open of the router reads the volume of the application from the stub
+    # components; the harnesses that share the prelude share the splice.
+    return splice(source, signature).replace(
+        'CServiceBroker::GetAppComponents().GetComponent<CApplicationVolumeHandling>()',
+        'appComponents.GetComponent<CApplicationVolumeHandling>()')
 PRELUDE = r'''
 #include <cassert>
 #include <algorithm>
@@ -32,9 +40,17 @@ struct CCriticalSection {
 struct CFileItem {int id=0;bool disc=false,video=true;bool IsDiscImage()const{return disc;}bool IsDVDFile()const{return false;}bool IsVideo()const{return video;}};
 struct CPlayerOptions {};
 struct IPlayerCallback {};
+// The volume of the application (CApplicationVolumeHandling)
+struct CApplicationVolumeHandling {float ratio=1;bool muted=false;
+  float GetVolumeRatio()const{return ratio;}bool IsMuted()const{return muted;}};
+static auto appVolume=std::make_shared<CApplicationVolumeHandling>();
+struct AppComponents {template<class T> std::shared_ptr<T> GetComponent()const{return appVolume;}};
+static const AppComponents appComponents;
 struct IPlayer {
   std::string m_name="old",m_type="video";
   bool playing=false,canClose=false;int closes=0,opens=0,lastItem=-1;
+  float volume=-1;bool muted=false;int volumes=0,mutes=0;
+  void SetVolume(float v){++volumes;volume=v;}void SetMute(bool m){++mutes;muted=m;}
   CCriticalSection* applicationLock=nullptr;int* destroyed=nullptr;
   ~IPlayer(){assert(!applicationLock||!applicationLock->held);if(destroyed)++*destroyed;}
   bool IsPlaying()const{return playing;}
@@ -92,7 +108,7 @@ CONTROLS_PLAYER = '''
   int SeekChapter(int){++controls;return 0;}bool SeekScene(bool){++controls;return true;}
   void SeekTime(int64_t){++controls;}bool SeekTimeRelative(int64_t){++controls;return true;}
   void SetSpeed(float){++controls;}void SetTempo(float){++controls;}void FrameAdvance(int){++controls;}
-  void SetMute(bool){++controls;}void SetVolume(float){++controls;}bool OnAction(const CAction&){++controls;return true;}'''
+  bool OnAction(const CAction&){++controls;return true;}'''
 CONTROLS_ROUTER = '''
   std::shared_ptr<IPlayer> GetControllable();bool SeekWaitingItem(int64_t,bool);
   bool IsPlaying()const;bool IsPlayingAudio()const{return false;}mutable std::function<void()> queryHook;
@@ -104,6 +120,7 @@ CONTROLS_ROUTER = '''
   void SetVolume(float);bool OnAction(const CAction&);'''
 # The inline intent predicates are the production ones.
 HEADER = (ROOT / 'xbmc/application/ApplicationPlayer.h').read_text()
+
 PRELUDE = PRELUDE.replace('@INLINE_INTENTS@', HEADER[HEADER.index('  void CancelOpens()'):
                                                       HEADER.index('  // The player plays the video item')])
 TESTS = r'''
@@ -117,7 +134,8 @@ static void controls_during_close(){
     app.SeekTime(1000);app.SeekTimeRelative(1000);app.SetPlaySpeed(1);app.SetSpeed(2);app.SetTempo(1.5f);
     app.FrameAdvance(1);app.SetMute(true);app.SetVolume(0.5f);app.OnAction(CAction{});};
   all();
-  assert(old->controls==14);
+  // the volume and the mute reach the player like the other controls
+  assert(old->controls==12&&old->volumes==1&&old->mutes==1);
   app.m_waitForPlaybackStop=true;
   assert(!app.ClosePlayer());
   assert(app.m_closingPlayer==old&&app.GetInternal()==old);
@@ -125,12 +143,41 @@ static void controls_during_close(){
   CFileItem newer;newer.id=2;
   assert(app.OpenFile(newer,options,factory,"new",callback));
   all();
-  assert(old->controls==14);
+  assert(old->controls==12&&old->volumes==1&&old->mutes==1);
   old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
   auto current=app.GetInternal();
   assert(current&&current!=old&&current->lastItem==2);
   all();
-  assert(current->controls==14&&old->controls==14);
+  assert(current->controls==12&&old->controls==12&&old->volumes==1&&old->mutes==1);
+}
+// The player of an open plays at the volume of the application: the player of a
+// direct open, and the player of a newer item that waited for the close of a
+// remote player (OpenNext), also after a volume change during the close. An
+// open that a newer open superseded during the open sets no volume.
+static void volume_after_open(){
+  CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
+  *appVolume={0.2f,false};
+  CApplicationPlayer app;app.createdType="remote";
+  CFileItem first;first.id=1;
+  assert(app.OpenFile(first,options,factory,"new",callback));
+  auto old=app.GetInternal();
+  assert(old&&old->volume==0.2f&&!old->muted&&old->volumes==1&&old->mutes==1);
+  CFileItem newer;newer.id=2;
+  assert(app.OpenFile(newer,options,factory,"new",callback)&&app.m_nextItem.pItem);
+  assert(app.m_closingPlayer==old&&old->volumes==1);
+  *appVolume={0.5f,true};
+  old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+  auto current=app.GetInternal();
+  assert(current&&current!=old&&current->lastItem==2);
+  assert(current->volume==0.5f&&current->muted&&current->volumes==1&&current->mutes==1&&old->volumes==1);
+  // a newer open during the open of a remote player supersedes the open
+  CFileItem latest;latest.id=3;
+  CApplicationPlayer other;other.createdType="remote";
+  other.createdDuringOpen=[&]{assert(other.OpenFile(latest,options,factory,"new",callback));};
+  assert(!other.OpenFile(first,options,factory,"new",callback));
+  auto superseded=other.GetInternal()?other.GetInternal():other.m_closingPlayer;
+  assert(superseded&&superseded->lastItem==1&&superseded->volumes==0&&superseded->mutes==0);
+  *appVolume={};
 }
 // The speed reset of an open takes the player once: the close of the player and
 // a newer open during the reset do not move the reset to the newer player.
@@ -208,6 +255,7 @@ static void state_during_close(){
 int main(){
   state_during_close();
   controls_during_close();
+  volume_after_open();
   speed_after_replacement();
   seek_waiting_item();
   shutdown_cases();

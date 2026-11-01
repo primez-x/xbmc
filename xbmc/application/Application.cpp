@@ -3049,7 +3049,6 @@ bool CApplication::StartPlayback(CFileItem item,
       CLog::LogF(LOGDEBUG, "Ignored {} playback thread messages", dMsgCount);
   }
 
-  const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
   appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this,
                      intent);
@@ -3058,8 +3057,6 @@ bool CApplication::StartPlayback(CFileItem item,
   if (appPlayer->OpenSuperseded(intent))
     return false;
   endPlaylist();
-  appPlayer->SetVolume(appVolume->GetVolumeRatio());
-  appPlayer->SetMute(appVolume->IsMuted());
 
 #if !defined(TARGET_POSIX)
   CGUIComponent *gui = CServiceBroker::GetGUI();
