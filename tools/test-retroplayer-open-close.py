@@ -15,8 +15,10 @@ reports the end only of a started game, and a close without an open item
 changes nothing: the retired player reports no end that stops the newer item,
 and the close in the destructor of the retired player keeps the render
 callbacks of a newer game. A shutdown waits for the close of the player, so a
-stop that waits ends the modal loops of the main thread: the open returns, the
-close completes, and the shutdown continues.
+stop that waits ends the waits of the main thread like the user: a modal
+dialog, a progress (the wake of a network share, the install of the emulator)
+and a busy dialog that the user can cancel. The open returns, the close
+completes, and the shutdown continues.
 """
 import runpy
 import subprocess
@@ -211,10 +213,20 @@ int main(){
 
 
 # The production application stop, the frame continuation of a waiting stop,
-# the close of the router and the modal loop of the window manager.
+# the close of the router, the modal loop of the window manager, and the waits
+# of the progress (WakeOnAccess) and the busy dialog.
 SHUTDOWN = r'''
 using IPlayer=CRetroPlayer;
-struct CEvent {void Set(){}};
+using namespace std::chrono_literals;
+static int64_t clockMs=0;
+namespace KODI {namespace TIME {void Sleep(std::chrono::milliseconds delay){clockMs+=delay.count();}}}
+namespace XbmcThreads {template<class=void> struct EndTime {
+ int64_t until;explicit EndTime(std::chrono::milliseconds delay):until(clockMs+delay.count()){}
+ bool IsTimePast()const{return clockMs>=until;}
+ std::chrono::milliseconds GetTimeLeft()const{return std::chrono::milliseconds(until-clockMs);}
+};}
+// An event that the wait never receives
+struct CEvent {void Set(){} bool Wait(std::chrono::milliseconds delay){clockMs+=delay.count();assert(clockMs<60000);return false;}};
 struct CSingleExit {explicit CSingleExit(CCriticalSection&) {}};
 struct CApplicationPlayer {
  mutable CCriticalSection m_playerLock;
@@ -241,29 +253,67 @@ struct CApplication {
  void FrameMove(){player.ContinueClose();@FRAME@}
 } g_application;
 @PENDING@
-struct CallbackLoop {bool GetRenderGUI(){return true;}void Process(){}void FrameMove(bool){g_application.FrameMove();}void Render(){}};
+// A Powerdown from a remote arrives in the first frame of the wait.
+static int frames=0;
+struct CallbackLoop {bool GetRenderGUI(){return true;}
+ void Process(){if(++frames==1)assert(!g_application.Stop(EXITCODE_POWERDOWN)&&g_application.m_pendingStop&&!g_application.m_bStop);}
+ void FrameMove(bool){g_application.FrameMove();}void Render(){}};
 struct CGUIWindowManager {CallbackLoop* m_pCallback;int m_iNested=0;bool ProcessRenderLoop(bool);};
 @LOOP@
+static CGUIWindowManager* manager=nullptr;
+struct CVariant {explicit CVariant(const std::string&) {}};
+struct CGUIDialog {bool m_active=true;bool IsActive()const{return m_active;}void Open(){m_active=true;}
+ void Close(bool=false){m_active=false;}void ProcessRenderLoop(bool renderOnly=false);};
+@DIALOG@
+struct CGUIDialogProgress:CGUIDialog {
+ static constexpr int CHOICE_NONE=-2,CHOICE_CANCELED=-1;int m_iChoice=CHOICE_NONE;
+ bool IsCanceled()const{return m_iChoice==CHOICE_CANCELED;}
+ void SetLine(int,const CVariant&){} void SetPercentage(int){} void Progress();
+};
+@PROGRESS@
+struct WaitCondition {bool SuccessWaiting()const{return false;}};
+struct ProgressDialogHelper {
+ enum wait_result {TimedOut,Canceled,Success};
+ CGUIDialogProgress* m_dialog;
+ wait_result ShowAndWait(const WaitCondition&,unsigned,const std::string&);
+};
+@SHOW@
+struct CGUIDialogBusy:CGUIDialog {bool m_cancelled=false;uint32_t m_waiters=0;
+ static bool WaitOnEvent(CEvent&,unsigned int=100,bool=true);};
+static CGUIDialogBusy busyDialog;
+@BUSY@
+enum {MODAL,PROGRESS,BUSY,WAITS};
 int main(){
  // A shutdown during each step of the open that waits in a dialog
+ for(int wait=0;wait<WAITS;++wait)
  for(int step=0;step<STEPS;++step){
-  g_application.m_bStop=false;g_application.m_pendingStop.reset();powerActions=0;
+  g_application.m_bStop=false;g_application.m_pendingStop.reset();powerActions=0;frames=0;clockMs=0;
   Callback cb;auto game=std::make_shared<CRetroPlayer>(cb);g_application.player.m_pPlayer=game;
   g_application.player.m_shutdown=false;
-  CallbackLoop loop;CGUIWindowManager manager{&loop};int frames=0;
+  CallbackLoop loop;CGUIWindowManager windows{&loop};manager=&windows;
   otherClientSave=true;waitStep=step;
   waitHook=[&]{
-   assert(!g_application.Stop(EXITCODE_POWERDOWN)&&g_application.m_pendingStop&&!g_application.m_bStop);
-   // the modal loop of the dialog ends at the first frame
-   while(manager.ProcessRenderLoop(false))assert(++frames<100);
+   if(wait==MODAL){
+    // the loop of CGUIDialog::Open_Internal
+    while(windows.ProcessRenderLoop(false))assert(frames<100);
+   }else if(wait==PROGRESS){
+    // the wait for the network of WakeOnAccess (40 s)
+    CGUIDialogProgress progress;ProgressDialogHelper wake{&progress};
+    assert(wake.ShowAndWait(WaitCondition{},40,"wake")==ProgressDialogHelper::Canceled);
+   }else{
+    busyDialog=CGUIDialogBusy{};CEvent never;
+    assert(!CGUIDialogBusy::WaitOnEvent(never,100,true)&&busyDialog.m_waiters==0);
+   }
+   // the wait ends in the frame of the stop (the busy dialog repaints once after the wait)
+   assert(frames==(wait==BUSY?2:1)&&clockMs<=200&&!g_application.m_bStop);
   };
   assert(!game->OpenFile(CFileItem{},CPlayerOptions{}));
-  assert(frames==0&&cb.started==0&&cb.ended==0);
+  assert(frames==(wait==BUSY?2:1)&&cb.started==0&&cb.ended==0);
   game.reset();
   g_application.FrameMove();
   assert(g_application.m_bStop&&!g_application.m_pendingStop&&!g_application.player.HasPlayer()&&powerActions==1);
  }
- std::cout<<"RetroPlayer shutdown: PASS (production stop, router close and modal loop; ASan/UBSan)\n";
+ std::cout<<"RetroPlayer shutdown: PASS (production stop, router close, modal loop, progress and busy waits; ASan/UBSan)\n";
 }
 '''
 
@@ -311,12 +361,10 @@ def main():
     app = (ROOT / 'xbmc/application/Application.cpp').read_text()
     router = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
     windows = (ROOT / 'xbmc/guilib/GUIWindowManager.cpp').read_text()
-    header = (ROOT / 'xbmc/application/Application.h').read_text()
     stop = function(app, 'bool CApplication::Stop(')
     frame = function(app, 'void CApplication::FrameMove(')
     frame = frame[frame.index('  if (m_pendingStop && !appPlayer->HasPlayer())'):frame.rindex('}')]
-    pending = header[header.index('  bool IsStopPending() const'):]
-    pending = pending[:pending.index('\n')].replace('IsStopPending()', 'CApplication::IsStopPending()').strip()
+    pending = function(app, 'bool CApplication::IsStopPending() const')
     shutdown = SHUTDOWN.replace('@ROUTER@', ''.join(function(router, signature) for signature in (
         'std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()',
         'std::shared_ptr<const IPlayer> CApplicationPlayer::GetInternal() const',
@@ -329,7 +377,16 @@ def main():
     shutdown = shutdown.replace('@FRAME@', frame.replace('appPlayer->', 'player.').replace(
         'CServiceBroker::GetPowerManager()', 'PowerManager{}'))
     shutdown = shutdown.replace('@PENDING@', pending).replace('@LOOP@', function(windows, 'bool CGUIWindowManager::ProcessRenderLoop('))
-    stopping = prelude.replace('#include <atomic>', '#include <atomic>\n#include <optional>\n#include <vector>', 1)
+    dialog = function((ROOT / 'xbmc/guilib/GUIDialog.cpp').read_text(), 'void CGUIDialog::ProcessRenderLoop(')
+    shutdown = shutdown.replace('@DIALOG@', dialog.replace('CServiceBroker::GetGUI()->GetWindowManager()', '(*manager)'))
+    shutdown = shutdown.replace('@PROGRESS@', function((ROOT / 'xbmc/dialogs/GUIDialogProgress.cpp').read_text(),
+                                                       'void CGUIDialogProgress::Progress()'))
+    show = function((ROOT / 'xbmc/network/WakeOnAccess.cpp').read_text(), '  wait_result ShowAndWait (')
+    shutdown = shutdown.replace('@SHOW@', show.replace(
+        '  wait_result ShowAndWait (', 'ProgressDialogHelper::wait_result ProgressDialogHelper::ShowAndWait (', 1))
+    busy = function((ROOT / 'xbmc/dialogs/GUIDialogBusy.cpp').read_text(), 'bool CGUIDialogBusy::WaitOnEvent(')
+    shutdown = shutdown.replace('@BUSY@', busy.replace('static_cast<CGUIDialogBusy*>(\n        CServiceBroker::GetGUI()->GetWindowManager().GetWindow(WINDOW_DIALOG_BUSY))', '&busyDialog'))
+    stopping = prelude.replace('#include <atomic>', '#include <algorithm>\n#include <atomic>\n#include <chrono>\n#include <optional>\n#include <vector>', 1)
     stopping = stopping.replace('struct CServiceBroker {', 'struct Window {CCriticalSection gfx;auto& GetGfxContext(){return gfx;} '
                                 'bool PrepareForShutdown(){return true;}};\nstruct CServiceBroker {static Window* GetWinSystem()'
                                 '{static Window w;return &w;}', 1)
