@@ -1032,6 +1032,19 @@ def main():
     assert 'std::atomic<uint64_t> m_openSequence' in header, 'm_openSequence must be atomic (CloseFile runs on another thread)'
     assert 'std::atomic<bool> m_stopremote' in header, 'm_stopremote must be atomic'
     assert 'std::atomic<bool> m_started' in header, 'm_started must be atomic (the worker thread reads the flag)'
+    # Platinum calls the router (CMediaController); the router forwards an answer
+    # to a registered userdata. Every answer of a command needs a forwarder.
+    source = (ROOT / 'xbmc/network/upnp/UPnPPlayer.cpp').read_text()
+    command = source[source.index('class CUPnPCommand'):]
+    command = command[:command.index('\n};\n')]
+    router = (ROOT / 'xbmc/network/upnp/UPnP.cpp').read_text()
+    router = router[router.index('class CMediaController'):]
+    for name in sorted(set(re.findall(r'void (On\w+Result)\(', command))):
+        assert 'void ' + name + '(' in router, 'the router does not forward ' + name
+        forward = router[router.index('void ' + name + '('):]
+        forward = forward[:forward.index('\n  }\n')]
+        assert 'CHECK_USERDATA_RETURN(userdata);' in forward and '->' + name + '(' in forward, \
+            'the router does not forward ' + name
     assert 'int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);' in header
     if args.negative_controls:
         for label, before, after in CONTROLS:
