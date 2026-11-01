@@ -2,9 +2,12 @@
 """RetroPlayer open and close with production methods and recording stubs.
 
 A newer item can retire the game player while the open of the game waits in a
-dialog (the game client selection with the emulator install, the savestate
-question): the router closes the player, and the open of the newer item can
-complete before the dialog returns. The open of the game then starts nothing. The close of a player
+dialog: the game client selection with the emulator install, the savestate
+question, or a wake dialog of a network share during the initialization of the
+game client, the open of the game, the load of the savestate or the request of
+the achievements. The router closes the player, and the open of the newer item
+can complete before the dialog returns. The close leaves the item to the open,
+and the open of the game then releases the item and starts nothing. The close of a player
 reports the end only of a started game, and a close without an open item
 changes nothing: the retired player reports no end that stops the newer item,
 and the close in the destructor of the retired player keeps the render
@@ -35,8 +38,13 @@ struct CURL {static std::string GetRedacted(const std::string& s){return s;}};
 struct StringUtils {template<class... A> static std::string Format(A&&...){return {};}};
 struct Localize {std::string Get(int){return {};}} g_localizeStrings;
 static std::function<bool()> savestateDialog;
+// A dialog that processes messages during a step of the open, in the order of the open
+enum {SELECTION,INITIALIZE,GAME_OPEN,SAVESTATE_QUESTION,ACHIEVEMENTS,PLAYBACK,STEPS};
+static int waitStep=-1;static std::function<void()> waitHook;
+static void Wait(int step){if(step==waitStep&&waitHook)std::exchange(waitHook,nullptr)();}
+static int savestates=0;
 struct CGUIDialogYesNo {template<class... A> static bool ShowAndGetInput(A&&...){
- return savestateDialog?std::exchange(savestateDialog,nullptr)():true;}};
+ Wait(SAVESTATE_QUESTION);return savestateDialog?std::exchange(savestateDialog,nullptr)():true;}};
 struct GameTag {std::string GetGameClient()const{return "game.test";}};
 struct CFileItem {std::string GetPath()const{return "game.rom";} GameTag* GetGameInfoTag(){static GameTag g;return &g;}};
 struct CPlayerOptions {};
@@ -47,13 +55,13 @@ struct GameSettings {bool AutosaveEnabled(){return false;} std::string GetRAUser
 struct GameServices {::GameSettings& GameSettings(){static ::GameSettings s;return s;}};
 struct Dummy {template<class... A> explicit Dummy(A&&...){} Dummy()=default;void ResetInfo(){}
  void SetDataCache(void*){} void SetVideoFps(float){} void StartAgentManager(){} void StopAgentManager(){}
- std::string CreateSavestate(bool){return {};} void EnableRichPresence(){} };
+ std::string CreateSavestate(bool){++savestates;return {};} void EnableRichPresence(){Wait(ACHIEVEMENTS);} };
 struct CRPProcessInfo: Dummy {static std::unique_ptr<CRPProcessInfo> CreateInstance(){return std::make_unique<CRPProcessInfo>();}};
 using CGUIGameMessenger=Dummy;using CRPRenderManager=Dummy;using CRPStreamManager=Dummy;
 using CRetroPlayerInput=Dummy;using CCheevos=Dummy;using CGUIPlaybackControl=Dummy;using CRetroPlayerAutoSave=Dummy;
 static int gameOpens=0,gameCloses=0;
-struct CGameClient {bool playing=false;bool Initialize(){return true;}
- template<class... A> bool OpenFile(A&&...){++gameOpens;playing=true;return true;}
+struct CGameClient {bool playing=false;bool Initialize(){Wait(INITIALIZE);return true;}
+ template<class... A> bool OpenFile(A&&...){Wait(GAME_OPEN);++gameOpens;playing=true;return true;}
  template<class... A> bool OpenStandalone(A&&...){++gameOpens;playing=true;return true;}
  std::string ID(){return "game.test";}std::string Name(){return "test";}float GetFrameRate(){return 60;}
  void CloseFile(){++gameCloses;playing=false;}void Unload(){}
@@ -73,7 +81,7 @@ struct CSavestateDatabase {static std::unique_ptr<ISavestate> AllocateSavestate(
  bool GetSavestate(const std::string&, ISavestate&){return otherClientSave;}};
 static std::function<bool()> clientDialog;
 namespace GAME {struct CGameUtils {static bool FillInGameClient(CFileItem&,std::string&){
- return clientDialog?std::exchange(clientDialog,nullptr)():true;}};}
+ Wait(SELECTION);return clientDialog?std::exchange(clientDialog,nullptr)():true;}};}
 struct CRetroPlayer {
  Callback& m_callback;GameServices m_gameServices;CCriticalSection m_mutex;@MEMBERS@
  std::unique_ptr<CRPProcessInfo> m_processInfo;std::unique_ptr<CGUIGameMessenger> m_guiMessenger;
@@ -83,25 +91,28 @@ struct CRetroPlayer {
  std::unique_ptr<CGUIPlaybackControl> m_playbackControl;std::unique_ptr<CRetroPlayerAutoSave> m_autoSave;
  explicit CRetroPlayer(Callback& c):m_callback(c){}
  ~CRetroPlayer(){CloseFile();}
- bool OpenFile(const CFileItem&,const CPlayerOptions&);bool CloseFile(bool=false);
+ bool OpenFile(const CFileItem&,const CPlayerOptions&);bool CloseFile(bool=false);void CloseItem();
  bool IsPlaying()const{return m_gameClient&&m_gameClient->playing;}
  void PrintGameInfo(const CFileItem&){} void RegisterWindowCallbacks(){}void UnregisterWindowCallbacks(){}
- void CreatePlayback(const std::string&){assert(m_gameClient);m_playback=std::make_unique<Dummy>();}
+ void CreatePlayback(const std::string&){Wait(PLAYBACK);assert(m_gameClient);m_playback=std::make_unique<Dummy>();}
 };
 '''
 
 MAIN = r'''
-static void reset(){gameOpens=gameCloses=0;otherClientSave=false;CServiceBroker::GetAppMessenger()->fullscreen=0;}
+static void reset(){gameOpens=gameCloses=savestates=0;otherClientSave=false;waitStep=-1;waitHook=nullptr;
+ CServiceBroker::GetAppMessenger()->fullscreen=0;}
 int main(){
- // A newer item retires the player during the game client selection (the
- // emulator install), and during the savestate question.
- for(int dialog=0;dialog<2;++dialog){reset();Callback cb;
+ // A newer item retires the player during each step of the open that can wait
+ // in a dialog. The close leaves the item to the open, and the open releases the
+ // item: the game client closes, and the open saves no game.
+ for(int step=0;step<STEPS;++step){reset();Callback cb;
   {CRetroPlayer player(cb);bool closed=false;
-   const auto retire=[&]{assert(player.CloseFile());closed=true;return true;};
-   if(dialog==0)clientDialog=retire;else{otherClientSave=true;savestateDialog=retire;}
+   otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;
+   waitHook=[&]{assert(player.CloseFile()&&(player.m_processInfo==nullptr)==(step==SELECTION));closed=true;};
    assert(!player.OpenFile(CFileItem{},CPlayerOptions{}));
-   assert(closed&&cb.started==0&&cb.ended==0&&!player.IsPlaying());
-   assert(CServiceBroker::GetAppMessenger()->fullscreen==0);
+   assert(closed&&cb.started==0&&cb.ended==0&&!player.IsPlaying()&&savestates==0);
+   assert(!player.m_gameClient&&!player.m_processInfo&&!player.m_playback&&!player.m_input);
+   assert(gameCloses==(step==SELECTION?0:1)&&CServiceBroker::GetAppMessenger()->fullscreen==0);
   }
   // the game never started: the destructor reports no end
   assert(cb.ended==0);
@@ -110,7 +121,7 @@ int main(){
  {reset();Callback cb;
   {CRetroPlayer player(cb);
    assert(player.OpenFile(CFileItem{},CPlayerOptions{})&&cb.started==1&&player.IsPlaying());
-   assert(player.CloseFile()&&cb.ended==1&&!player.IsPlaying()&&gameCloses==1);
+   assert(player.CloseFile()&&cb.ended==1&&!player.IsPlaying()&&gameCloses==1&&!player.m_gameClient);
    assert(player.CloseFile()&&cb.ended==1);
   }
   assert(cb.ended==1);
@@ -150,8 +161,8 @@ static CGUIGameRenderManager sharedRenderer;
 
 RENDER_MAIN = r'''
 int main(){
- for(int dialog=0;dialog<2;++dialog){
-  Callback oldCb,newCb;
+ for(int step=0;step<STEPS;++step){
+  Callback oldCb,newCb;savestates=0;
   auto old=std::make_unique<CRetroPlayer>(oldCb);
   auto newer=std::make_unique<CRetroPlayer>(newCb);
   CGUIRenderHandle handle;
@@ -163,15 +174,15 @@ int main(){
    assert(sharedRenderer.m_gameCallback==newer.get()&&sharedRenderer.m_renderTargets.at(&handle));
    return true;
   };
-  if(dialog==0)clientDialog=replace;else{otherClientSave=true;savestateDialog=replace;}
+  otherClientSave=step==SAVESTATE_QUESTION;waitStep=step;waitHook=[&]{replace();};
   assert(!old->OpenFile(CFileItem{},CPlayerOptions{}));
   old.reset();
-  assert(oldCb.started==0&&oldCb.ended==0);
+  assert(oldCb.started==0&&oldCb.ended==0&&savestates==0);
   assert(newer->IsPlaying()&&newCb.started==1&&newCb.ended==0);
   assert(sharedRenderer.IsPlayingGame()&&sharedRenderer.m_gameCallback==newer.get());
   assert(sharedRenderer.m_renderTargets.at(&handle));
   newer.reset();
-  assert(newCb.ended==1&&!sharedRenderer.IsPlayingGame());
+  assert(newCb.ended==1&&savestates==1&&!sharedRenderer.IsPlayingGame());
   sharedRenderer.m_renderTargets.clear();
  }
  std::cout<<"RetroPlayer render callbacks: PASS (production registration; ASan/UBSan)\n";
@@ -196,7 +207,8 @@ def main():
     members = header[header.index('  // Synchronization parameters'):header.index('};\n} // namespace RETRO')]
     members = members.replace('  CCriticalSection m_mutex;\n', '')
     prelude = PRELUDE.replace('@MEMBERS@', members)
-    player = function(source, 'bool CRetroPlayer::OpenFile(') + function(source, 'bool CRetroPlayer::CloseFile(')
+    player = function(source, 'bool CRetroPlayer::OpenFile(') + function(source, 'bool CRetroPlayer::CloseFile(') + \
+        function(source, 'void CRetroPlayer::CloseItem()')
     compile_run(prelude + player + MAIN)
     # The production registration of the window callbacks and the render manager.
     manager = (ROOT / 'xbmc/cores/RetroPlayer/guibridge/GUIGameRenderManager.cpp').read_text()

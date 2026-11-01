@@ -103,6 +103,7 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
     CLog::Log(LOGERROR, "RetroPlayer[PLAYER]: Failed to create - no process info registered");
     return false;
   }
+  m_opening = true;
 
   m_processInfo->SetDataCache(&CServiceBroker::GetDataCacheCore());
   m_processInfo->ResetInfo();
@@ -113,7 +114,7 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
   std::unique_lock<CCriticalSection> lock(m_mutex);
 
   if (IsPlaying())
-    CloseFile();
+    CloseItem();
 
   PrintGameInfo(fileCopy);
 
@@ -183,8 +184,7 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
           bool dummy;
           if (!CGUIDialogYesNo::ShowAndGetInput(
                   438, StringUtils::Format(g_localizeStrings.Get(35217), addon->Name()), dummy, 222,
-                  35218, 0) ||
-              !m_itemOpen)
+                  35218, 0))
             bSuccess = false;
         }
       }
@@ -193,9 +193,6 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
 
   if (bSuccess)
   {
-    // Switch to fullscreen
-    CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SWITCHTOFULLSCREEN);
-
     m_cheevos = std::make_shared<CCheevos>(m_gameClient.get(),
                                            m_gameServices.GameSettings().GetRAUsername(),
                                            m_gameServices.GameSettings().GetRAToken());
@@ -204,6 +201,24 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
 
     // Initialize gameplay
     CreatePlayback(savestatePath);
+  }
+
+  // Every step above can wait in a dialog (also a wake dialog of a network
+  // share), and a newer item can retire the player in the dialog. The open
+  // then releases the item and starts nothing.
+  m_opening = false;
+  if (!m_itemOpen)
+  {
+    CLog::Log(LOGINFO, "RetroPlayer[PLAYER]: Closed during the open");
+    CloseItem();
+    return false;
+  }
+
+  if (bSuccess)
+  {
+    // Switch to fullscreen
+    CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SWITCHTOFULLSCREEN);
+
     RegisterWindowCallbacks();
     m_playbackControl = std::make_unique<CGUIPlaybackControl>(*this);
     m_started = true;
@@ -229,20 +244,32 @@ bool CRetroPlayer::OpenFile(const CFileItem& file, const CPlayerOptions& options
 
 bool CRetroPlayer::CloseFile(bool reopen /* = false */)
 {
-  if (!m_itemOpen.exchange(false))
+  if (!m_itemOpen.exchange(false) || m_opening)
     return true;
 
+  CloseItem();
+
+  return true;
+}
+
+void CRetroPlayer::CloseItem()
+{
   CLog::Log(LOGDEBUG, "RetroPlayer[PLAYER]: Closing file");
+
+  // Only a started game registered the window callbacks, has a game to save,
+  // and has an end to report
+  const bool started = m_started.exchange(false);
 
   m_autoSave.reset();
 
-  UnregisterWindowCallbacks();
+  if (started)
+    UnregisterWindowCallbacks();
 
   m_playbackControl.reset();
 
   std::unique_lock<CCriticalSection> lock(m_mutex);
 
-  if (m_gameClient && m_gameServices.GameSettings().AutosaveEnabled())
+  if (started && m_gameClient && m_gameServices.GameSettings().AutosaveEnabled())
   {
     std::string savePath = m_playback->CreateSavestate(true);
     if (!savePath.empty())
@@ -276,10 +303,8 @@ bool CRetroPlayer::CloseFile(bool reopen /* = false */)
   }
   m_processInfo.reset();
   CLog::Log(LOGDEBUG, "RetroPlayer[PLAYER]: Playback ended");
-  if (m_started.exchange(false))
+  if (started)
     m_callback.OnPlayBackEnded();
-
-  return true;
 }
 
 bool CRetroPlayer::IsPlaying() const

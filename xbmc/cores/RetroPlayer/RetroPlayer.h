@@ -114,6 +114,9 @@ private:
   void RegisterWindowCallbacks();
   void UnregisterWindowCallbacks();
 
+  // Releases the item of the open
+  void CloseItem();
+
   /**
    * \brief Dump game information (if any) to the debug log.
    */
@@ -142,9 +145,12 @@ private:
   // Synchronization parameters
   CCriticalSection m_mutex;
   // The item of the open, from the start of the open until the close. A close
-  // during the dialogs of the open (a newer item retires the player) cancels
-  // the open, and a close without an item changes nothing.
+  // during the open (a newer item retires the player in a dialog of the open)
+  // cancels the open, and a close without an item changes nothing.
   std::atomic<bool> m_itemOpen{false};
+  // The open owns the item until the open returns: a close during the open
+  // leaves the release of the item to the open
+  std::atomic<bool> m_opening{false};
   // The close reports the end only of a started game
   std::atomic<bool> m_started{false};
 };
