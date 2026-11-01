@@ -8,6 +8,7 @@
 
 #include "ApplicationPlayer.h"
 
+#include "FileItem.h"
 #include "ServiceBroker.h"
 #include "cores/DataCacheCore.h"
 #include "cores/IPlayer.h"
@@ -20,6 +21,7 @@
 #include "threads/Event.h"
 
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 
 using namespace std::chrono_literals;
@@ -480,12 +482,21 @@ bool CApplicationPlayer::SeekScene(bool bPlus)
 bool CApplicationPlayer::SeekWaitingItem(int64_t time, bool relative)
 {
   // A newer item that waits for the close of the old player opens at the time
-  // of the seek. The other seeks need the opened item.
+  // of the seek, like a new request for the time: the players read the start
+  // time (VideoPlayer, UPnP) or the start offset of the item (PAPlayer). A
+  // relative seek from a start in percent needs the length of the item, and the
+  // start offset of a cue sheet track is the start of the track: these seeks
+  // drop, like the other seeks, which need the opened item.
   std::unique_lock<CCriticalSection> lock(m_playerLock);
   if (!m_nextItem.pItem)
     return false;
-  double& start = m_nextItem.options.starttime;
-  start = std::max(0.0, (relative ? start : 0.0) + time / 1000.0);
+  CPlayerOptions& options = m_nextItem.options;
+  CFileItem& item = *m_nextItem.pItem;
+  if ((relative && options.startpercent > 0.0) || item.HasProperty("item_start"))
+    return true;
+  options.starttime = std::max(0.0, (relative ? options.starttime : 0.0) + time / 1000.0);
+  options.startpercent = 0.0;
+  item.SetStartOffset(std::llround(options.starttime * 1000.0));
   return true;
 }
 

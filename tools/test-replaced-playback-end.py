@@ -900,7 +900,7 @@ SEEK = r"""
   assert(app.player.m_nextItem.pItem->startOffset==20000);
   app.SeekTime(150);app.player.SeekTimeRelative(-5000);
   assert(old->seeks==0&&old->seekLog.empty()&&app.player.m_nextItem.pItem->id==101);
-  assert(app.player.m_nextItem.options.starttime==45);
+  assert(app.player.m_nextItem.options.starttime==45&&app.player.m_nextItem.pItem->startOffset==45000);
   old->canClose=true;app.player.OnPlaybackStopped();app.Frame();
   assert(app.player.IsPlaying()&&app.player.m_pPlayer->lastItem==101);
  }
@@ -1041,13 +1041,14 @@ static void QueueMusic(){
 #undef g_application
 int main(){""", 1)
     # The base program also runs the production stack seek.
-    base = base.replace('struct CFileItem {', 'struct CFileItem {uint64_t startOffset=0;void SetStartOffset(uint64_t o){startOffset=o;}', 1)
+    base = base.replace('struct CFileItem {', 'struct CFileItem {uint64_t startOffset=0;void SetStartOffset(uint64_t o){startOffset=o;}'
+                        'bool HasProperty(const char*)const{return false;}', 1)
     base = base.replace('struct IPlayer {', 'struct IPlayer {int seeks=0;std::vector<std::string> seekLog;'
                         'void SeekTime(int64_t t){++seeks;seekLog.push_back("abs"+std::to_string(t));}'
                         'bool SeekTimeRelative(int64_t t){seekLog.push_back("rel"+std::to_string(t));return true;}', 1)
     assert base.count('struct CPlayerOptions {bool fullscreen=false;};')==1
     base = base.replace('struct CPlayerOptions {bool fullscreen=false;};',
-                        'struct CPlayerOptions {bool fullscreen=false;double starttime=0;};', 1)
+                        'struct CPlayerOptions {bool fullscreen=false;double startpercent=0,starttime=0;};', 1)
     base = base.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {mutable std::function<void()> canSeekHook;'
                         'bool CanSeek()const{if(canSeekHook){auto hook=std::move(canSeekHook);hook();}return true;}'
                         'void SeekTime(int64_t);void SeekTimeRelative(int64_t);bool SeekWaitingItem(int64_t,bool);'
@@ -1064,6 +1065,7 @@ int main(){""", 1)
                         'void PostMsg(int){}void PostMsg(int,int,int,void* payload){queued=payload;}'
                         'void PostMsg(int,int64_t ms){posted.push_back(ms);}int SendMsg(int id,int64_t ms);};', 1)
     base = base.replace('struct CApplication {', 'struct CApplication {void SeekTime(double);void SeekStackTime(int64_t);', 1)
+    base = '#include <cmath>\n' + base
     # The main thread runs the message, and the caller waits for the seek.
     base += ('int Messenger::SendMsg(int id,int64_t ms){assert(id==TMSG_MEDIA_SEEK_STACK_TIME);++sent;'
              'main->SeekStackTime(ms);return 0;}\n')

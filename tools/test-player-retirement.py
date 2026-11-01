@@ -87,7 +87,7 @@ struct CApplicationPlayer {
 '''
 # A control of a stopped item resumes, pauses or seeks the item.
 CONTROLS_PLAYER = '''
-  int controls=0;double startTime=-1;
+  int controls=0;double startTime=-1,startPercent=-1;int64_t startOffset=-1;
   void Pause(){++controls;}void Seek(bool,bool,bool){++controls;}void SeekPercentage(float){++controls;}
   int SeekChapter(int){++controls;return 0;}bool SeekScene(bool){++controls;return true;}
   void SeekTime(int64_t){++controls;}bool SeekTimeRelative(int64_t){++controls;return true;}
@@ -146,21 +146,40 @@ static void speed_after_replacement(){
   assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1);
 }
 // A newer item that waits for the close of the old player takes the time of an
-// absolute or relative seek: the item opens at the time. The other seeks need
-// the opened item.
+// absolute or relative seek, like a new request for the time: the start time
+// (VideoPlayer, UPnP) and the start offset of the item (PAPlayer). A relative
+// seek from a start in percent and a seek in a cue sheet track drop, like the
+// other seeks, which need the opened item.
 static void seek_waiting_item(){
-  CPlayerOptions options;options.starttime=20;CPlayerCoreFactory factory;IPlayerCallback callback;
-  CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
-  app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
-  CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
-  app.SeekTime(50000);assert(app.m_nextItem.options.starttime==50);
-  app.SeekTimeRelative(-10000);assert(app.m_nextItem.options.starttime==40);
-  app.SeekTimeRelative(-60000);assert(app.m_nextItem.options.starttime==0);
-  app.SeekTime(30000);app.SeekTimeRelative(5000);
-  assert(old->controls==0);
-  old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
-  auto current=app.GetInternal();
-  assert(current&&current!=old&&current->lastItem==2&&current->startTime==35&&current->controls==0);
+  for(int kind=0;kind<3;++kind){
+   CPlayerOptions options;options.starttime=kind==1?0:20;options.startpercent=kind==1?40:0;
+   CPlayerCoreFactory factory;IPlayerCallback callback;
+   CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
+   app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
+   CFileItem newer;newer.id=2;newer.startOffset=kind==1?0:20000;newer.cue=kind==2;
+   assert(app.OpenFile(newer,options,factory,"new",callback));
+   const auto& next=app.m_nextItem;
+   if(kind==0){
+    app.SeekTime(50000);assert(next.options.starttime==50&&next.pItem->startOffset==50000);
+    app.SeekTimeRelative(-10000);assert(next.options.starttime==40&&next.pItem->startOffset==40000);
+    app.SeekTimeRelative(-60000);assert(next.options.starttime==0&&next.pItem->startOffset==0);
+    app.SeekTime(30000);app.SeekTimeRelative(5000);
+   }
+   if(kind==1){
+    app.SeekTimeRelative(5000);assert(next.options.startpercent==40&&next.options.starttime==0&&next.pItem->startOffset==0);
+    app.SeekTime(30000);assert(next.options.startpercent==0&&next.options.starttime==30&&next.pItem->startOffset==30000);
+    app.SeekTimeRelative(5000);
+   }
+   if(kind==2){
+    app.SeekTime(50000);app.SeekTimeRelative(5000);
+    assert(next.options.starttime==20&&next.pItem->startOffset==20000);
+   }
+   assert(old->controls==0);
+   old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+   auto current=app.GetInternal();
+   assert(current&&current!=old&&current->lastItem==2&&current->controls==0);
+   assert(current->startTime==(kind==2?20:35)&&current->startOffset==(kind==2?20000:35000)&&current->startPercent==0);
+  }
 }
 // A stopped player that closes is not playing. A newer open that waits for the
 // close continues the playback, like an open in progress.
@@ -285,11 +304,16 @@ def main():
         'bool CApplicationPlayer::OnAction(', 'std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()',
         'bool CApplicationPlayer::SeekWaitingItem(',
         'bool CApplicationPlayer::IsPlaying() const']) + TESTS
+    code = '#include <cmath>\n' + code
     # The playback controls of the router and the players; other harnesses share the prelude.
     for anchor, stubs in (('struct IPlayer {', 'struct CAction {int GetID()const{return 0;}};\nstruct IPlayer {' + CONTROLS_PLAYER),
-                          ('struct CPlayerOptions {};', 'struct CPlayerOptions {double starttime=0;};'),
+                          ('struct CPlayerOptions {};', 'struct CPlayerOptions {double startpercent=0,starttime=0;};'),
+                          ('struct CFileItem {int id=0;', 'struct CFileItem {int id=0;int64_t startOffset=0;bool cue=false;'
+                           'void SetStartOffset(int64_t o){startOffset=o;}int64_t GetStartOffset()const{return startOffset;}'
+                           'bool HasProperty(const std::string& p)const{return cue&&p=="item_start";}'),
                           ('  bool OpenFile(const CFileItem& file,const CPlayerOptions&){\n    ++opens;',
-                           '  bool OpenFile(const CFileItem& file,const CPlayerOptions& o){\n    ++opens;startTime=o.starttime;'),
+                           '  bool OpenFile(const CFileItem& file,const CPlayerOptions& o){\n    ++opens;startTime=o.starttime;'
+                           'startPercent=o.startpercent;startOffset=file.startOffset;'),
                           ('  bool HasPlayer() {return bool(GetInternal());}', '  bool HasPlayer() {return bool(GetInternal());}' + CONTROLS_ROUTER)):
         assert code.count(anchor) == 1, anchor
         code = code.replace(anchor, stubs, 1)
