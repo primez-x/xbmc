@@ -252,6 +252,8 @@ private:
 
   std::shared_ptr<IPlayer> m_pPlayer;
   std::shared_ptr<IPlayer> m_closingPlayer;
+  // The controls that took the player (GetControllable) and still run, under m_playerLock
+  int m_controls{0};
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents;
   std::vector<std::shared_ptr<CEvent>> m_retiredCloseCompletionEvents;
   bool m_closeAcknowledged{false};

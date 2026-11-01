@@ -276,7 +276,7 @@ struct CApplicationPlayer {
  mutable CCriticalSection m_playerLock;
  std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
  struct {std::shared_ptr<CFileItem> pItem;} m_nextItem;
- bool m_shutdown=false,m_closeAcknowledged=false,m_waitForPlaybackStop=false;
+ bool m_shutdown=false,m_closeAcknowledged=false,m_waitForPlaybackStop=false;int m_controls=0;
  std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
  enum class Supersession {NONE,OPEN,STOP}; Supersession m_supersededBy=Supersession::NONE;
  uint64_t m_supersededAt=0,m_intentSequence=0;

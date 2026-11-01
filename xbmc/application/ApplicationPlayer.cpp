@@ -45,7 +45,17 @@ std::shared_ptr<IPlayer> CApplicationPlayer::GetControllable()
   // The user stopped a closing player: a control would resume, pause or seek the
   // stopped item, and a remote renderer would play the item again.
   std::unique_lock<CCriticalSection> lock(m_playerLock);
-  return m_pPlayer == m_closingPlayer ? nullptr : m_pPlayer;
+  if (!m_pPlayer || m_pPlayer == m_closingPlayer)
+    return nullptr;
+  // A control that took the player before a close (also on another thread:
+  // JSON-RPC, Python) can reach the player after the close. The close completes
+  // after the control, so the control changes no shared state of a newer
+  // playback (the data cache, the pause notification).
+  ++m_controls;
+  return std::shared_ptr<IPlayer>(m_pPlayer.get(), [this, player = m_pPlayer](IPlayer*) {
+    std::unique_lock<CCriticalSection> lock(m_playerLock);
+    --m_controls;
+  });
 }
 
 bool CApplicationPlayer::ClosePlayer(bool shutdown, std::shared_ptr<CEvent> completion)
@@ -91,6 +101,10 @@ void CApplicationPlayer::ContinueClose()
 
   {
     std::unique_lock<CCriticalSection> lock(m_playerLock);
+    // A control that took the player before the close still runs: the main
+    // thread does not wait, and the next frame completes the close.
+    if (m_controls > 0)
+      return;
     if (m_pPlayer == original)
       m_pPlayer.reset();
     m_closingPlayer.reset();

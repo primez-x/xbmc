@@ -69,7 +69,7 @@ struct CApplicationPlayer {
   mutable CCriticalSection m_playerLock;
   std::shared_ptr<IPlayer> m_pPlayer,m_closingPlayer;
   std::vector<std::shared_ptr<CEvent>> m_closeCompletionEvents,m_retiredCloseCompletionEvents;
-  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;
+  bool m_closeAcknowledged=false,m_waitForPlaybackStop=false,m_shutdown=false;int m_controls=0;
   enum class Supersession {NONE,OPEN,STOP} m_supersededBy=Supersession::NONE;
   uint64_t m_supersededAt=0,m_intentSequence=0,m_opensCancelledAt=0,m_lastAcceptedIntent=0;std::vector<uint64_t> m_openIntents;bool m_openedVideo=false;
   uint64_t BeginOpen();void EndOpen(uint64_t);bool IsOpening()const{return !m_openIntents.empty();}
@@ -180,17 +180,25 @@ static void volume_after_open(){
   *appVolume={};
 }
 // The speed reset of an open takes the player once: the close of the player and
-// a newer open during the reset do not move the reset to the newer player.
+// a newer open during the reset do not move the reset to the newer player. A
+// control that took the player before the close (also on another thread: JSON-RPC,
+// Python) reaches the old player before the newer player opens: the old backend
+// changes no shared state of the newer playback (the data cache, the pause
+// notification) (Sol's round 39 probe). The close completes after the control,
+// without another close of the player.
 static void speed_after_replacement(){
   CPlayerOptions options;CPlayerCoreFactory factory;IPlayerCallback callback;
   CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
   app.queryHook=[&]{
     app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
     CFileItem newer;newer.id=2;assert(app.OpenFile(newer,options,factory,"new",callback));
-    old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);};
+    old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
+    assert(app.m_closingPlayer==old&&app.m_nextItem.pItem&&app.created==0&&old->controls==0);};
   app.SetPlaySpeed(1);
+  assert(old->controls==1&&app.m_closingPlayer==old&&app.created==0);
+  app.ContinueClose();app.OpenNext(factory);
   auto current=app.GetInternal();
-  assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1);
+  assert(current&&current!=old&&current->lastItem==2&&current->controls==0&&old->controls==1&&old->closes==3);
 }
 // A newer item that waits for the close of the old player takes the time of an
 // absolute or relative seek, like a new request for the time: the start time
