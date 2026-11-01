@@ -23,8 +23,10 @@ using namespace XFILE;
 
 namespace
 {
-// The part items of a stack carry the path of the stack: the key of the registration
+// The part items of a stack carry the path of the stack and the position of the
+// part: the key of the registration
 constexpr const char* STACK_PATH_PROPERTY = "stack_path";
+constexpr const char* STACK_PART_PROPERTY = "stack_part";
 } // namespace
 
 CApplicationStackHelper::CApplicationStackHelper(void)
@@ -68,7 +70,7 @@ void CApplicationStackHelper::OnPlayBackStarted(const CFileItem& item)
   while (itr != m_stackmap.end())
   {
     if ((stack && itr->second->m_pStack == stack) ||
-        (!m_currentStackPath.empty() && itr->first.second == m_currentStackPath))
+        (!m_currentStackPath.empty() && std::get<1>(itr->first) == m_currentStackPath))
     {
       ++itr;
     }
@@ -95,6 +97,7 @@ bool CApplicationStackHelper::InitializeStack(const CFileItem & item)
   {
     // keep cross-references between stack parts and the stack
     GetStackPartFileItem(i).SetProperty(STACK_PATH_PROPERTY, item.GetPath());
+    GetStackPartFileItem(i).SetProperty(STACK_PART_PROPERTY, i);
     SetRegisteredStack(GetStackPartFileItem(i), stack);
     SetRegisteredStackPartNumber(GetStackPartFileItem(i), i);
   }
@@ -351,7 +354,8 @@ void CApplicationStackHelper::SetRegisteredStackTotalTimeMs(const CFileItem& ite
 CApplicationStackHelper::RegistrationKey CApplicationStackHelper::GetRegistrationKey(
     const CFileItem& item)
 {
-  return {item.GetPath(), item.GetProperty(STACK_PATH_PROPERTY).asString()};
+  return {item.GetPath(), item.GetProperty(STACK_PATH_PROPERTY).asString(),
+          static_cast<int>(item.GetProperty(STACK_PART_PROPERTY).asInteger(-1))};
 }
 
 CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(

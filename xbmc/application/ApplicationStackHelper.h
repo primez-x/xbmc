@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 
 class CFileItem;
 class CFileItemList;
@@ -209,9 +210,9 @@ protected:
 
   typedef std::shared_ptr<StackPartInformation> StackPartInformationPtr;
   // A registration belongs to a part of one stack (the path of the part, the path
-  // of the stack): another stack or a single video with the same file has a
-  // separate registration.
-  using RegistrationKey = std::pair<std::string, std::string>;
+  // of the stack, the position of the part): another stack, a single video with
+  // the same file and a repeated part of the stack have separate registrations.
+  using RegistrationKey = std::tuple<std::string, std::string, int>;
   typedef std::map<RegistrationKey, StackPartInformationPtr> Stackmap;
   Stackmap m_stackmap;
   static RegistrationKey GetRegistrationKey(const CFileItem& item);

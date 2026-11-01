@@ -1005,6 +1005,9 @@ int main(){
 # Every reader and writer of the registrations: the player threads (the start and
 # the close callbacks), a job (the save of the file state) and the main thread
 # (the adoption and the initialization of a stack, the fullscreen condition).
+# The production key of a registration
+STACK_HEADER = (ROOT / 'xbmc/application/ApplicationStackHelper.h').read_text()
+REGISTRATION_KEY = STACK_HEADER[STACK_HEADER.index('  using RegistrationKey'):STACK_HEADER.index('  typedef std::map<RegistrationKey')]
 REGISTRATION_ACCESSORS = (
     'void CApplicationStackHelper::Clear()',
     'bool CApplicationStackHelper::InitializeStack(',
@@ -1126,6 +1129,15 @@ int main(){
  // a single video of the same file saves the bookmark of the file
  CApplicationPlayerCallback().OnPlayerCloseFile(CFileItem{"shared.mkv"},bookmark);
  assert(saves==3&&savedPath=="shared.mkv"&&saved.timeInSeconds==600&&saved.totalTimeInSeconds==1800);
+ // A stack can repeat a part (Sol's round 38 probe): each position of the part
+ // saves the bookmark of the position.
+ stack.Stage({"a.mkv","b.mkv","a.mkv"},0);
+ for(int i=0;i<3;++i){const CFileItem part=stack.GetStackPartFileItem(i);
+  stack.SetRegisteredStackPartStartTimeMs(part,i*1800000);stack.SetRegisteredStackTotalTimeMs(part,5400000);}
+ for(int i:{0,2}){
+  CApplicationPlayerCallback().OnPlayerCloseFile(stack.GetStackPartFileItem(i),bookmark);
+  assert(savedPath=="stack://a.mkv , b.mkv , a.mkv"&&saved.timeInSeconds==600+i*1800&&saved.partNumber==i);
+ }
 }
 """
 
@@ -1145,7 +1157,10 @@ def stack_registration_program(function):
 #include <utility>
 #include <vector>
 struct CURL {std::string path;};
-struct CVariant {std::string value;const std::string& asString() const {return value;}};
+// A property is a text or a number; a missing property is null.
+struct CVariant {std::string value;bool null=true;CVariant()=default;
+ CVariant(std::string text):value(std::move(text)),null(false){} CVariant(int number):value(std::to_string(number)),null(false){}
+ const std::string& asString() const {return value;} int64_t asInteger(int64_t fallback=0) const {return null?fallback:std::stoll(value);}};
 // The lock counts the locks of the thread, and the map of the registrations
 // fails every access of a thread without the lock.
 static thread_local int t_locks=0;
@@ -1168,14 +1183,14 @@ template<class K,class V> struct CheckedMap {
  void clear(){Check();map.clear();} bool empty() const {Check();return map.empty();}
 };
 struct CFileItem {
- std::string path;int offset=0;std::map<std::string,std::string> properties;
+ std::string path;int offset=0;std::map<std::string,CVariant> properties;
  CFileItem(std::string itemPath={},int startOffset=0):path(std::move(itemPath)),offset(startOffset){}
  const std::string& GetPath() const {return path;} const std::string& GetDynPath() const {return path;}
  int GetStartOffset() const {return offset;}
  bool IsStack() const {return path.rfind("stack://",0)==0;} CURL GetURL() const {return {path};}
  CVariant GetProperty(const std::string& key) const
- {const auto it=properties.find(key);return {it==properties.end()?std::string():it->second};}
- void SetProperty(const std::string& key,const std::string& value){properties[key]=value;}
+ {const auto it=properties.find(key);return it==properties.end()?CVariant():it->second;}
+ void SetProperty(const std::string& key,const CVariant& value){properties[key]=value;}
 };
 struct CFileItemList {
  std::vector<std::shared_ptr<CFileItem>> items;
@@ -1194,7 +1209,7 @@ struct CApplicationStackHelper {
  struct StackPartInformation {uint64_t m_lStackPartStartTimeMs=0;uint64_t m_lStackTotalTimeMs=0;
   int m_lStackPartNumber=0;std::shared_ptr<CFileItem> m_pStack;};
  using StackPartInformationPtr=std::shared_ptr<StackPartInformation>;
- using RegistrationKey=std::pair<std::string,std::string>;
+ """ + REGISTRATION_KEY + r"""
  using Stackmap=CheckedMap<RegistrationKey,StackPartInformationPtr>;
  mutable CCriticalSection m_critSection;Stackmap m_stackmap;
  std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
