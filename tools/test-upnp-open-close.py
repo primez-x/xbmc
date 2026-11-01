@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Execute the production CUPnPPlayer open/close methods against a recording renderer.
 
-Extracts WaitOnEvent, PlayFile, OpenFile, CloseFile, the destructor and one pass
-of the worker loop from xbmc/network/upnp/UPnPPlayer.cpp and splices them into a
-C++ prelude with stub Platinum/Neptune types. The fake renderer records every
+Extracts WaitOnEvent, PlayFile, OpenFile, CloseFile, the destructor, the controls,
+OnExit and one pass of the worker loop from xbmc/network/upnp/UPnPPlayer.cpp and
+splices them into a C++ prelude with stub Platinum/Neptune types. The fake renderer records every
 command in order and answers each command inside the next busy-dialog wait, or
 between two frames of the application. A hook runs inside that wait, as the
 GUI/application message pump does, and closes the player or starts a newer player
@@ -33,6 +33,7 @@ PRELUDE = r'''
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 using namespace std::chrono_literals;
@@ -51,6 +52,7 @@ typedef unsigned NPT_Cardinal;
 #define NPT_SUCCEEDED(r) ((r) == NPT_SUCCESS)
 #define NPT_CHECK_LABEL(x, l) do { NPT_Result r_ = (x); if (r_ != NPT_SUCCESS) goto l; } while (0)
 #define NPT_CHECK_LABEL_SEVERE(x, l) NPT_CHECK_LABEL(x, l)
+#define NPT_CHECK(x) do { NPT_Result r_ = (x); if (r_ != NPT_SUCCESS) return r_; } while (0)
 #define NPT_CHECK_POINTER_LABEL_SEVERE(p, l) do { if (!(p)) goto l; } while (0)
 #define NPT_SET_LOCAL_LOGGER(x)
 
@@ -121,13 +123,21 @@ struct CFileItem {
 };
 struct CPlayerOptions { double starttime = 0; };
 struct IPlayerCallback {
-  int started = 0, avstarted = 0, stopped = 0, ended = 0;
-  void OnPlayBackStarted(const CFileItem&) { ++started; }
-  void OnAVStarted(const CFileItem&) { ++avstarted; }
-  void OnPlayBackStopped() { ++stopped; }
-  void OnPlayBackEnded() { ++ended; }
-  void OnPlayBackPaused() {}
-  void OnPlayBackResumed() {}
+  int started = 0, avstarted = 0, stopped = 0, ended = 0, paused = 0, resumed = 0;
+  std::string events;  // the order of the events
+  std::function<void()> hook;  // runs inside each event
+  void Event(int& count, char event) {
+    ++count;
+    events += event;
+    if (hook)
+      hook();
+  }
+  void OnPlayBackStarted(const CFileItem&) { Event(started, 'S'); }
+  void OnAVStarted(const CFileItem&) { Event(avstarted, 'A'); }
+  void OnPlayBackStopped() { Event(stopped, 'T'); }
+  void OnPlayBackEnded() { Event(ended, 'E'); }
+  void OnPlayBackPaused() { Event(paused, 'P'); }
+  void OnPlayBackResumed() { Event(resumed, 'R'); }
   int Total() const { return started + avstarted + stopped + ended; }
 };
 struct LoggerImpl {
@@ -143,8 +153,20 @@ struct CDataCacheCore {
   void SetPlayTimes(int64_t, int64_t, int64_t, int64_t) {}
   float GetSpeed() const { return speed; }
   void SetSpeed(float, float s) { speed = s; }
+  void SeekFinished(int64_t) {}
 };
-struct CServiceBroker { static CDataCacheCore& GetDataCacheCore() { return CDataCacheCore::GetInstance(); } };
+struct CSettings {
+  static constexpr const char* SETTING_SERVICES_UPNPPLAYERVOLUMESYNC = "services.upnpplayervolumesync";
+  bool GetBool(const char*) const { return true; }
+};
+struct CSettingsComponent {
+  std::shared_ptr<CSettings> settings = std::make_shared<CSettings>();
+  std::shared_ptr<CSettings> GetSettings() { return settings; }
+};
+struct CServiceBroker {
+  static CDataCacheCore& GetDataCacheCore() { return CDataCacheCore::GetInstance(); }
+  static CSettingsComponent* GetSettingsComponent() { static CSettingsComponent c; return &c; }
+};
 
 void DeliverPending();
 struct CCriticalSection : std::recursive_mutex {};
@@ -166,7 +188,7 @@ template<class T = std::chrono::milliseconds> struct EndTime {
   template<class D> EndTime(D d) : initial(std::chrono::duration_cast<std::chrono::milliseconds>(d)) {}
   void Set(std::chrono::milliseconds d) { initial = d; polls = 0; }
   std::chrono::milliseconds GetInitialTimeoutValue() const { return initial; }
-  bool IsTimePast() { return ++polls > 50; }
+  bool IsTimePast() { return initial.count() == 0 || ++polls > 50; }
   std::chrono::milliseconds initial{0};
   int polls = 0;
 };
@@ -206,6 +228,9 @@ struct PLT_MediaControllerDelegate {
   virtual void OnSetNextAVTransportURIResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
   virtual void OnPlayResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
   virtual void OnStopResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnPauseResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnSeekResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
+  virtual void OnSetVolumeResult(NPT_Result, PLT_DeviceDataReference&, void*) {}
   virtual void OnGetTransportInfoResult(NPT_Result, PLT_DeviceDataReference&, PLT_TransportInfo*,
                                         void*) {}
 };
@@ -237,8 +262,20 @@ struct PLT_MediaController {
     return Send(d, userdata, "SetNextAVTransportURI", nullptr);
   }
   NPT_Result Play(PLT_DeviceDataReference&, NPT_UInt32, const char*, void* userdata);
+  // A control: the answer comes after the delivery rounds of controlDelay
+  NPT_Result Control(PLT_DeviceDataReference& d, void* userdata, const char* cmd,
+                     void (PLT_MediaControllerDelegate::*result)(NPT_Result,
+                                                                 PLT_DeviceDataReference&, void*));
   NPT_Result Seek(PLT_DeviceDataReference& d, NPT_UInt32, const char*, const NPT_String&,
-                  void* userdata) { return Send(d, userdata, "Seek", nullptr); }
+                  void* userdata) {
+    return Control(d, userdata, "Seek", &PLT_MediaControllerDelegate::OnSeekResult);
+  }
+  NPT_Result Pause(PLT_DeviceDataReference& d, NPT_UInt32, void* userdata) {
+    return Control(d, userdata, "Pause", &PLT_MediaControllerDelegate::OnPauseResult);
+  }
+  NPT_Result SetVolume(PLT_DeviceDataReference& d, NPT_UInt32, const char*, int, void* userdata) {
+    return Control(d, userdata, "SetVolume", &PLT_MediaControllerDelegate::OnSetVolumeResult);
+  }
   NPT_Result GetPositionInfo(PLT_DeviceDataReference& d, NPT_UInt32, void* userdata) {
     return Send(d, userdata, "GetPositionInfo", nullptr);
   }
@@ -286,6 +323,8 @@ public:
   std::string uri;      // the URI of the last SetAVTransportURI
   std::string nextState;  // the state of the next GetTransportInfo answer, once
   bool playUnanswered = false;  // the renderer never answers Play
+  int controlDelay = 0;  // the delivery rounds that the answer of a control waits
+  bool controlUnanswered = false;  // the renderer never answers a control
   bool stopUnanswered = false;  // the renderer never answers Stop
 };
 
@@ -358,6 +397,18 @@ NPT_Result PLT_MediaController::Play(PLT_DeviceDataReference& device, NPT_UInt32
   });
 }
 
+NPT_Result PLT_MediaController::Control(
+    PLT_DeviceDataReference& device, void* userdata, const char* cmd,
+    void (PLT_MediaControllerDelegate::*result)(NPT_Result, PLT_DeviceDataReference&, void*)) {
+  auto* r = device.owner;
+  if (r->controlUnanswered)
+    return Send(device, userdata, cmd, nullptr);
+  return Send(device, userdata, cmd, [device, result](PLT_MediaControllerDelegate& d) {
+    auto dev = device;
+    (d.*result)(NPT_SUCCESS, dev, nullptr);
+  }, r->controlDelay);
+}
+
 PLT_MediaController g_ctl;
 std::vector<void*> g_userdata;  // the Platinum userdata registry
 std::vector<void*> g_unregistered;  // every userdata that left the registry
@@ -382,10 +433,16 @@ public:
                uint64_t open);
   void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  int SendControl(const std::function<int(void* userdata)>& send);
+  void Pause();
+  void SeekTime(int64_t ms);
+  void SetSpeed(float speed);
+  void SetVolume(float volume);
+  void OnExit();
   bool IsRunning() const { return running; }
   void Create() { ++creates; running = true; }
   void StopThread(bool) { running = false; }
-  bool IsPaused() const { return false; }
+  bool IsPaused() const;
   int64_t GetTime() { return 0; }
   int64_t GetTotalTime() { return 0; }
   // One pass of the worker loop of CUPnPPlayer::Process.
@@ -399,6 +456,9 @@ public:
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting;
+  CCriticalSection m_itemSection;
+  std::vector<std::shared_ptr<CUPnPCommand>> m_controls;
+  XbmcThreads::EndTime<> m_controlTimeout;
   std::shared_ptr<CUPnPCommand> m_stop;
   XbmcThreads::EndTime<> m_stopTimeout;
   bool m_hasVideo{false};
@@ -883,11 +943,156 @@ void attach() {
   ExpectLog(Of("P", {"GetTransportInfo"}));
 }
 
+// The close ends the item: a control after the start of the close sends the
+// renderer nothing and reports no event. A resume after the Stop would start the
+// stopped renderer again. A control after the end of the item does the same.
+void control_after_close() {
+  for (bool ended : {false, true}) {
+    Begin(ended ? "control after the end of the item" : "control after the close starts");
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    if (ended) {
+      p.m_delegate->nextState = "STOPPED";
+      p.m_delegate->pollDue = true;
+      p.WorkerStep();
+      DeliverPending();
+      p.WorkerStep();
+      CHECK(cb.ended == 1);
+    } else {
+      CHECK(!p.CloseFile());
+      CHECK(Count("P:Stop") == 1);
+    }
+    const auto sent = g_ctl.log.size();
+    p.m_delegate->m_trainfo.cur_transport_state = "PAUSED_PLAYBACK";
+    p.SetSpeed(1.0f);
+    p.Pause();
+    p.m_delegate->m_trainfo.cur_transport_state = "PLAYING";
+    p.Pause();
+    p.SeekTime(42000);
+    p.SetVolume(0.5f);
+    CHECK(g_ctl.log.size() == sent && cb.paused == 0 && cb.resumed == 0);
+    Close(p);
+    CHECK(Count("P:Play") == 1 && Count("P:Stop") == 1);
+  }
+}
+
+// The renderer can receive the commands in any order: the close stops the
+// renderer after the answers of the sent controls. No control arrives after the
+// Stop, or reaches the item of a newer player on the renderer.
+void control_before_close() {
+  Begin("controls sent before the close");
+  IPlayerCallback cbA;
+  auto a = std::make_unique<CUPnPPlayer>(cbA, "A");
+  CHECK(a->OpenFile(Item(), CPlayerOptions()));
+  a->m_delegate->controlDelay = 2;
+  a->m_delegate->m_trainfo.cur_transport_state = "PAUSED_PLAYBACK";
+  a->SetSpeed(1.0f);
+  a->m_delegate->m_trainfo.cur_transport_state = "PLAYING";
+  a->Pause();
+  a->SeekTime(42000);
+  a->SetVolume(0.5f);
+  CHECK(Count("A:Play") == 2 && Count("A:Pause") == 1 && Count("A:Seek") == 1 &&
+        Count("A:SetVolume") == 1);
+  // the Stop goes after the answers of the controls: only the answer of the Stop is due
+  g_ctl.cmdHook = [](const std::string& c) {
+    if (c == "A:Stop")
+      CHECK(g_ctl.pending.size() == 1);
+  };
+  CHECK(!a->CloseFile());
+  CHECK(Count("A:Stop") == 0 && cbA.stopped == 1);
+  CHECK(Close(*a) > 3 && Count("A:Stop") == 1);
+  g_ctl.cmdHook = nullptr;
+  CHECK(cbA.events == "SARPT");
+}
+
+// A renderer that never answers a control does not keep the close: the close
+// stops the renderer at the deadline of the control. The destructor cannot wait,
+// and stops the renderer at once.
+void unanswered_control() {
+  Begin("renderer never answers a control");
+  {
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    p.m_delegate->controlUnanswered = true;
+    p.SeekTime(42000);
+    CHECK(!p.CloseFile() && Count("P:Stop") == 0);
+    CHECK(Close(p) > 2 && Count("P:Stop") == 1 && cb.stopped == 1);
+  }
+  Begin("destroy a player that waits for a control");
+  {
+    IPlayerCallback cb;
+    CUPnPPlayer p(cb, "P");
+    CHECK(p.OpenFile(Item(), CPlayerOptions()));
+    p.m_delegate->controlUnanswered = true;
+    p.SeekTime(42000);
+  }
+  CHECK(Count("P:Stop") == 1);
+}
+
+// The start, the controls, the events and the end of the item hold the item
+// section, also the close: a close on another thread cannot end the item between
+// the check of a control and the send, or between the check of an event and the
+// event.
+bool SectionFree(CUPnPPlayer& p) {
+  bool free = false;
+  std::thread([&] {
+    free = p.m_itemSection.try_lock();
+    if (free)
+      p.m_itemSection.unlock();
+  }).join();
+  return free;
+}
+void item_section() {
+  Begin("the item section covers the item");
+  IPlayerCallback cb;
+  auto p = std::make_unique<CUPnPPlayer>(cb, "P");
+  int held = 0;
+  auto check = [&] {
+    CHECK(!SectionFree(*p));
+    ++held;
+  };
+  cb.hook = check;
+  CHECK(p->OpenFile(Item(), CPlayerOptions()));
+  CHECK(held == 2);  // the start
+  g_ctl.cmdHook = [&](const std::string&) { check(); };
+  p->m_delegate->m_trainfo.cur_transport_state = "PAUSED_PLAYBACK";
+  p->SetSpeed(1.0f);
+  p->m_delegate->m_trainfo.cur_transport_state = "PLAYING";
+  p->Pause();
+  p->SeekTime(42000);
+  p->SetVolume(0.5f);
+  CHECK(held == 8);  // four controls and two events
+  g_ctl.cmdHook = nullptr;
+  // the worker sees the renderer pause and resume, then stop
+  CDataCacheCore::GetInstance().speed = 1.0f;
+  p->m_delegate->m_trainfo.cur_transport_state = "PAUSED_PLAYBACK";
+  p->WorkerStep();
+  p->m_delegate->m_trainfo.cur_transport_state = "PLAYING";
+  p->WorkerStep();
+  p->m_delegate->m_trainfo.cur_transport_state = "STOPPED";
+  p->WorkerStep();
+  CHECK(held == 11 && cb.events == "SARPPRE");
+  Close(*p);
+  // the close and the exit of the worker
+  p = std::make_unique<CUPnPPlayer>(cb, "Q");
+  CHECK(p->OpenFile(Item(), CPlayerOptions()));
+  CHECK(!p->CloseFile());
+  CHECK(held == 14);
+  Close(*p);
+  p = std::make_unique<CUPnPPlayer>(cb, "R");
+  CHECK(p->OpenFile(Item(), CPlayerOptions()));
+  p->OnExit();
+  CHECK(held == 17 && cb.events == "SARPPRESATSAE");
+  Close(*p);
+}
+
 #define CASES(X) X(normal_open_close) X(close_twice) X(close_without_wait) X(close_inside_wait) \
   X(close_inside_wait_renderer_playing) X(newer_player_on_same_renderer) X(refused_stop) \
   X(unanswered_stop) X(one_end_notification) X(destroy_during_close) X(transitioning_renderer) \
   X(abandoned_command) X(failed_send) X(close_unanswered_wait) X(close_during_last_command) \
-  X(attach)
+  X(attach) X(control_after_close) X(control_before_close) X(unanswered_control) X(item_section)
 int main(int argc, char** argv) {
 #define ENTRY(name) {#name, name},
   const std::vector<std::pair<const char*, void (*)()>> cases = {CASES(ENTRY)};
@@ -913,7 +1118,7 @@ CONTROLS = [
     ('Play does not mark the renderer as started',
      '    m_stopremote = true;\n    NPT_CHECK_LABEL_SEVERE(WaitOnEvent', '    NPT_CHECK_LABEL_SEVERE(WaitOnEvent'),
     ('OpenFile does not check the open sequence before starting',
-     'if (open != m_openSequence)\n    goto failed;', 'if (false)\n    goto failed;'),
+     'if (open != m_openSequence)\n      goto failed;', 'if (false)\n      goto failed;'),
     ('CloseFile does not end the open',
      '  CancelOpen();\n  NPT_CHECK_POINTER', '  NPT_CHECK_POINTER'),
     ('a close does not end the waits of the open',
@@ -936,14 +1141,48 @@ CONTROLS = [
     ('the close has no deadline',
      'if (!m_stop->m_answered && !m_stopTimeout.IsTimePast())', 'if (!m_stop->m_answered)'),
     ('the close does not end the item',
-     'if (m_started.exchange(false))\n    m_callback.OnPlayBackStopped();',
-     'if (m_started)\n    m_callback.OnPlayBackStopped();'),
+     'if (m_started.exchange(false))\n      m_callback.OnPlayBackStopped();',
+     'if (m_started)\n      m_callback.OnPlayBackStopped();'),
     ('the worker reports the end twice',
-     'if (m_delegate->GetTransportState() == "STOPPED" && m_started.exchange(false))',
-     'if (m_delegate->GetTransportState() == "STOPPED" && m_started)'),
+     '        if (m_started.exchange(false))\n        {\n          m_logger->info(',
+     '        if (m_started)\n        {\n          m_logger->info('),
     ('the destructor does not stop the worker',
      '  CloseFile();\n  // the close can wait for the renderer: the worker uses the members\n  StopThread(true);',
      '  CloseFile();'),
+    ('a resume after the close reaches the renderer',
+     '  if (!m_started)\n    return;\n  if (IsPaused() && speed == 1.0f)', '  if (IsPaused() && speed == 1.0f)'),
+    ('a pause after the close reaches the renderer',
+     '  if (!m_started)\n    return;\n  if (IsPaused())\n', '  if (IsPaused())\n'),
+    ('a seek after the close reaches the renderer',
+     '  if (!m_started)\n    return;\n  NPT_CHECK_LABEL(SendControl', '  NPT_CHECK_LABEL(SendControl'),
+    ('a volume change after the close reaches the renderer',
+     '    if (!m_started)\n      return;\n    NPT_CHECK_POINTER_LABEL_SEVERE', '    NPT_CHECK_POINTER_LABEL_SEVERE'),
+    ('the close stops the renderer before the answers of the controls',
+     '      if (!m_controlTimeout.IsTimePast())\n        return false;\n', ''),
+    ('the close waits for an unanswered control without a deadline',
+     'if (!m_controlTimeout.IsTimePast())', 'if (true)'),
+    ('the close does not wait for a control',
+     '  m_controls.emplace_back(command);\n', ''),
+    ('a control has no deadline', '  m_controlTimeout.Set(10s);\n', ''),
+    ('the destructor waits for the controls',
+     '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    m_controls.clear();\n  }\n  CloseFile();',
+     '  }\n  CloseFile();'),
+    ('the close ends the item outside the item section',
+     '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    // the close ends the item', '    // the close ends the item'),
+    ('the start of the item is outside the item section',
+     '    std::unique_lock<CCriticalSection> lock(m_itemSection);\n    if (open != m_openSequence)', '    if (open != m_openSequence)'),
+    ('a resume is outside the item section',
+     'void CUPnPPlayer::SetSpeed(float speed)\n{\n  std::unique_lock<CCriticalSection> lock(m_itemSection);\n',
+     'void CUPnPPlayer::SetSpeed(float speed)\n{\n'),
+    ('a pause event of the worker is outside the item section',
+     '      {\n        std::unique_lock<CCriticalSection> lock(m_itemSection);\n        if (m_started && paused)',
+     '      {\n        if (m_started && paused)'),
+    ('the end of the item by the worker is outside the item section',
+     '        std::unique_lock<CCriticalSection> lock(m_itemSection);\n        if (m_started.exchange(false))',
+     '        if (m_started.exchange(false))'),
+    ('the exit of the worker is outside the item section',
+     'void CUPnPPlayer::OnExit()\n{\n  std::unique_lock<CCriticalSection> lock(m_itemSection);\n',
+     'void CUPnPPlayer::OnExit()\n{\n'),
 ]
 
 
@@ -954,8 +1193,11 @@ def production():
     command = source[command:source.index('\n};\n', command) + 4]
     command += function(source, 'static std::shared_ptr<CUPnPCommand> NewCommand()')
     command += function(source, 'static NPT_Result Sent(')
-    signatures = ['void CUPnPPlayer::CancelOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(',
-                  'bool CUPnPPlayer::CloseFile(', 'CUPnPPlayer::~CUPnPPlayer()']
+    signatures = ['void CUPnPPlayer::CancelOpen()', 'int CUPnPPlayer::WaitOnEvent(', 'int CUPnPPlayer::SendControl(',
+                  'int CUPnPPlayer::PlayFile(', 'bool CUPnPPlayer::OpenFile(', 'bool CUPnPPlayer::CloseFile(',
+                  'CUPnPPlayer::~CUPnPPlayer()', 'void CUPnPPlayer::Pause()', 'void CUPnPPlayer::SeekTime(',
+                  'void CUPnPPlayer::SetSpeed(', 'void CUPnPPlayer::SetVolume(', 'bool CUPnPPlayer::IsPaused() const',
+                  'void CUPnPPlayer::OnExit()']
     body = '\n'.join(function(source, signature) for signature in signatures)
     # The worker: one pass of the Process loop.
     process = function(source, 'void CUPnPPlayer::Process()')

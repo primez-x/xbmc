@@ -16,6 +16,7 @@
 #include "utils/logtypes.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +65,8 @@ private:
   // Ends an open in progress; the waits of the open end
   void CancelOpen();
   int WaitOnEvent(CUPnPCommand& command, XbmcThreads::EndTime<>& timeout, uint64_t open);
+  // Sends a control of the item; the caller holds m_itemSection
+  int SendControl(const std::function<int(void* userdata)>& send);
   int64_t GetTime();
   int64_t GetTotalTime();
   float GetPercentage();
@@ -82,6 +85,13 @@ private:
   std::atomic<uint64_t> m_openSequence{0};
   CCriticalSection m_waitSection;
   std::vector<CUPnPCommand*> m_waiting; // the commands that an open waits for
+  // Orders the start, the controls, the events and the end of the item with the
+  // close: the renderer gets no control after the Stop, and the application gets
+  // no event of the item after the end of the item
+  CCriticalSection m_itemSection;
+  // The sent controls and the end of the wait for the answers
+  std::vector<std::shared_ptr<CUPnPCommand>> m_controls;
+  XbmcThreads::EndTime<> m_controlTimeout;
   // The Stop of the close and the end of the wait for the answer
   std::shared_ptr<CUPnPCommand> m_stop;
   XbmcThreads::EndTime<> m_stopTimeout;
