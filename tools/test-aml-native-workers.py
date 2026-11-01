@@ -66,6 +66,7 @@ struct CWinSystemAmlogic{std::unique_ptr<DV> m_dolbyVisionAML=std::make_unique<D
 @RETIRE@
 struct CWinSystemAmlogicGLESContext:CWinSystemAmlogic{
  void SetNativeGuiWait(bool){} // lease policy is covered by the native GUI wait fixture
+ void GuiABFinish(const char*){} // GUI A/B finish is covered by the GUI A/B fixture
  bool m_shutdownRequested=false;CAMLDisplayLifecycle m_displayLifecycle;
  std::unique_ptr<CAMLDisplayLifecycle::Mutation> m_shutdownAdmission;bool PrepareForShutdown();
 };

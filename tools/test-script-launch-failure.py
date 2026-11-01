@@ -19,12 +19,10 @@ FILES = ['xbmc/threads/Thread.h', 'xbmc/threads/Thread.cpp',
          'xbmc/interfaces/generic/ILanguageInvocationHandler.h',
          'xbmc/interfaces/generic/LanguageInvokerThread.h', 'xbmc/interfaces/generic/LanguageInvokerThread.cpp',
          'xbmc/interfaces/generic/ScriptInvocationManager.h', 'xbmc/interfaces/generic/ScriptInvocationManager.cpp']
-BASELINE = '6a19454cab0cccf91bd838aff59a93477b79e36a'
 
 
-def program(baseline=False):
-    source = {p: subprocess.check_output(['git', 'show', BASELINE + ':' + p], cwd=ROOT, text=True)
-              if baseline else (ROOT / p).read_text() for p in FILES}
+def program():
+    source = {p: (ROOT / p).read_text() for p in FILES}
     th = source[FILES[0]]
     tc = source[FILES[1]]
     ih = source[FILES[2]]
@@ -74,7 +72,8 @@ def program(baseline=False):
                       'void CLanguageInvokerThread::OnStartup()', 'void CLanguageInvokerThread::Process()',
                       'void CLanguageInvokerThread::OnExit()', 'void CLanguageInvokerThread::OnException()']:
         code += function(lc, signature) + '\n'
-    for signature in ['void CLanguageInvokerThread::OnLaunchFailed()']:
+    for signature in ['void CLanguageInvokerThread::OnLaunchFailed()', 'bool CLanguageInvokerThread::Reuseable(',
+                      'bool CLanguageInvokerThread::Keeps(', 'bool CLanguageInvokerThread::Retired()']:
         if signature in lc:
             code += function(lc, signature) + '\n'
     for signature in ['CScriptInvocationManager::~CScriptInvocationManager()', 'void CScriptInvocationManager::Process()',
@@ -90,13 +89,12 @@ def program(baseline=False):
         if signature.startswith('int CScriptInvocationManager::Execute'):
             # ExecuteAsync/Sync each have two production overloads.
             code += function(mc[mc.find(signature, first+len(signature)):], signature) + '\n'
-    for signature in ['void CScriptInvocationManager::RemoveFailedInvocation(', 'void CScriptInvocationManager::RemoveScriptPath(']:
+    for signature in ['void CScriptInvocationManager::RemoveFailedInvocation(', 'void CScriptInvocationManager::RemoveScriptPath(',
+                      'void CScriptInvocationManager::ReleaseLastInvokerThread()', 'bool CScriptInvocationManager::OwnsClaim(',
+                      'CLanguageInvokerThreadPtr CScriptInvocationManager::TakeReusableThread(']:
         if signature in mc:
             code += function(mc, signature) + '\n'
-    tests = TESTS
-    if baseline:
-        tests = tests.replace("auto completion=worker->m_future;", "auto completion=worker->m_future.share();")
-    return code + tests
+    return code + TESTS
 
 
 def compile_test(out, code):
@@ -106,34 +104,27 @@ def compile_test(out, code):
                     '-fno-omit-frame-pointer', str(out / 'test.cpp'), '-o', str(out / 'test')], check=True)
 
 
-def expect_failure(binary, mode, marker, timeout=4, baseline=False):
-    # Keep leak detection enabled. Baseline overflow remains recoverable so its
-    # independently demonstrated wrapper leak can also be observed.
-    env = {**os.environ, 'UBSAN_OPTIONS': 'halt_on_error=0' if baseline else 'halt_on_error=1'}
+def expect_failure(binary, mode, marker, timeout=4):
+    # Keep leak detection enabled.
+    env = {**os.environ, 'UBSAN_OPTIONS': 'halt_on_error=1'}
     try:
         result = subprocess.run([str(binary), mode], capture_output=True, text=True, timeout=timeout, env=env)
         assert marker != 'timeout' and result.returncode != 0 and marker in result.stderr, (mode, result.stderr)
         print(mode + ': rejected as expected', flush=True)
-        print(result.stderr[-1800:] if baseline else result.stderr.splitlines()[-1], flush=True)
+        print(result.stderr.splitlines()[-1], flush=True)
     except subprocess.TimeoutExpired:
         assert marker == 'timeout', mode
         print(mode + ': timed out at the missing completion/startup signal as expected', flush=True)
 
 
-def main(baseline=False, controls=False):
+def main(controls=False):
     with tempfile.TemporaryDirectory(prefix='script-launch-') as name:
         out = Path(name)
-        code = program(baseline)
+        code = program()
         compile_test(out, code)
-        if baseline:
-            for mode, marker in [('gui-failure', 'std::system_error'), ('destructor-failure', 'timeout'),
-                                 ('retirement', 'LeakSanitizer'), ('path-retirement', 'manager.IsRunning(second)')]:
-                expect_failure(out / 'test', mode, marker, baseline=True)
-        else:
-            subprocess.run([str(out / 'test')], check=True, timeout=30,
-                           env={**os.environ, 'UBSAN_OPTIONS': 'halt_on_error=1'})
+        subprocess.run([str(out / 'test')], check=True, timeout=30,
+                       env={**os.environ, 'UBSAN_OPTIONS': 'halt_on_error=1'})
         if controls:
-            assert not baseline
             mutations = [
                 ('startup rollback', 'm_StopEvent.Set();\n    m_StartEvent.Set();',
                  'm_StopEvent.Set();', 'destructor-failure', 'timeout'),
@@ -159,7 +150,7 @@ def main(baseline=False, controls=False):
                 compile_test(out, code.replace(old, new))
                 print('Negative control: ' + label, flush=True)
                 expect_failure(out / 'test', mode, marker)
-    print('Script launch: ' + ('BASELINE REPRODUCED' if baseline else 'PASS') +
+    print('Script launch: PASS' +
           ' (production thread/invocation methods; native host threads; interpreter/platform stubs; ASan/UBSan)', flush=True)
 
 
@@ -309,17 +300,16 @@ void SuccessReuse(){
  auto thread=manager.m_lastInvokerThread;
  auto invoker=std::static_pointer_cast<FakeInvoker>(thread->GetInvoker());
  Await([&]{return invoker->ready==1;});{std::lock_guard<std::mutex> lock(thread->m_mutex);}
- assert(manager.GetReusablePluginHandle("reused.py")==44);
- auto reused=manager.GetLanguageInvoker("reused.py");assert(reused==invoker);
- assert(manager.ExecuteAsync("reused.py",reused,{}, {},true,44)==id);
+ assert(manager.GetReusablePluginHandle("reused.py")==44&&manager.m_lastInvokerClaimed);
+ // The claim selects the kept thread inside ExecuteAsync(), which restarts the same invoker.
+ assert(manager.ExecuteAsync("reused.py",{}, {},true,44)==id&&!manager.m_lastInvokerClaimed);
  Await([&]{return invoker->ready==2;});{std::lock_guard<std::mutex> lock(thread->m_mutex);}
  assert(launches==before+1&&handler.starts==2&&handler.executions==2);
- thread->Stop(true);assert(!thread->CThread::IsRunning());
- // Explicit invoker overload can enter its existing cached-thread branch even
- // after that native thread retired. A failed restart must clean this branch too.
- failCode=11;assert(manager.ExecuteAsync("reused.py",reused)==-1);
+ thread->Stop(true);assert(!thread->CThread::IsRunning());manager.Process();
+ // The kept thread retired. The request must drop it and clean the new thread's failed launch.
+ failCode=11;assert(manager.ExecuteAsync("reused.py")==-1);
  assert(!manager.m_lastInvokerThread&&manager.m_scripts.empty()&&manager.m_scriptPaths.empty());
- assert(reused->GetState()==InvokerStateFailed);
+ assert(launches==before+2&&handler.starts==2);
 }
 void ParallelPaths(){
  Handler handler;CScriptInvocationManager manager;Setup(manager,handler);
@@ -334,13 +324,13 @@ void ParallelPaths(){
 }
 void PathRetirement(){
  Handler handler;CScriptInvocationManager manager;Setup(manager,handler);
- auto first=manager.ExecuteAsync("shared.py",std::make_shared<FakeInvoker>(handler),{}, {},true);
- auto firstThread=manager.m_lastInvokerThread;auto firstInvoker=std::static_pointer_cast<FakeInvoker>(firstThread->GetInvoker());
- Await([&]{return firstInvoker->ready==1;});{std::lock_guard<std::mutex> lock(firstThread->m_mutex);}
+ // Only one invoker is kept per script, so the first run ends and the second stays alive.
+ auto first=manager.ExecuteAsync("shared.py",std::make_shared<FakeInvoker>(handler),{}, {},false);
+ Await([&]{return !manager.IsRunning(first);});
  auto second=manager.ExecuteAsync("shared.py",std::make_shared<FakeInvoker>(handler),{}, {},true);
  auto secondThread=manager.m_lastInvokerThread;auto secondInvoker=std::static_pointer_cast<FakeInvoker>(secondThread->GetInvoker());
  Await([&]{return secondInvoker->ready==1;});{std::lock_guard<std::mutex> lock(secondThread->m_mutex);}
- assert(first!=second);firstThread->Stop(true);manager.Process();
+ assert(first!=second&&manager.m_scriptPaths.at("shared.py")==first);manager.Process();
  assert(manager.IsRunning(second)&&manager.IsRunning("shared.py")&&manager.m_scriptPaths.at("shared.py")==second);
  secondThread->Stop(true);manager.Process();
 }
@@ -351,7 +341,9 @@ void ReentrantFailure(){
   later=manager.ExecuteAsync("overlap.py",std::make_shared<FakeInvoker>(handler),{}, {},true,91);
   retained=manager.m_lastInvokerThread;
  };
- failCode=11;assert(manager.ExecuteAsync("overlap.py",std::make_shared<FakeInvoker>(handler),{}, {},true,73)==-1);
+ // The failing launch holds its thread mutex, so an overlapping call on this thread must not query a kept
+ // thread. The failing request is not kept; cleanup must still leave the later kept thread and path alone.
+ failCode=11;assert(manager.ExecuteAsync("overlap.py",std::make_shared<FakeInvoker>(handler),{}, {},false,73)==-1);
  assert(later>=0&&manager.m_lastInvokerThread==retained&&manager.m_lastPluginHandle==91);
  assert(manager.m_scripts.size()==1&&manager.IsRunning(later)&&manager.m_scriptPaths.at("overlap.py")==later);
  retained->Stop(true);manager.Process();
@@ -405,7 +397,6 @@ int main(int argc,char**argv){
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--baseline', action='store_true')
     parser.add_argument('--controls', action='store_true')
     args = parser.parse_args()
-    main(args.baseline, args.controls)
+    main(args.controls)

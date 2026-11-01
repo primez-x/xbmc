@@ -177,7 +177,7 @@ struct CAMLCodec {
  CDVDVideoCodec::VCReturn GetPicture(VideoPicture&);
  CAMLCodec(){auto r=m_session.Fence();assert(m_session.BeginMutation(r));assert(m_session.Complete(r,true));}
 };
-''' + speed + '\n' + picture[:picture.index('  struct vdec_info vi;')] + 'return CDVDVideoCodec::VC_NONE;\n}\n'
+''' + speed + '\n' + picture[:picture.index('  struct vdec_info vi = {};')] + 'return CDVDVideoCodec::VC_NONE;\n}\n'
     pause_tests = r'''
 int main(){
  const char* path="/sys/class/amdolby_vision/backend_state";
@@ -272,10 +272,11 @@ int main(){
 int directoryReads=0;
 std::map<std::string,bool> modules;
 namespace XFILE {struct CDirectory {static bool Exists(const char* path){++directoryReads;return modules[path];}};}
+struct URIUtils {static std::string GetDirectory(const std::string& path){auto slash=path.find_last_of("/\\");return slash==std::string::npos?"":path.substr(0,slash+1);}};
 struct CGUIWindowSystemInfo {
  std::chrono::steady_clock::time_point m_dvModuleStatusUpdated{};
  bool m_doviLoaded=false,m_dovi5Loaded=false;
- std::string m_doviModulePath,m_dovi5ModulePath;
+ std::string m_doviModuleFolder,m_dovi5ModuleFolder;
  void UpdateDVModuleStatus();
 };
 '''
@@ -290,8 +291,8 @@ int main(){
   modules["/sys/module/dovi"]=old;modules["/sys/module/dovi5"]=newer;
   window.m_dvModuleStatusUpdated={};window.UpdateDVModuleStatus();
   assert(window.m_doviLoaded==old&&window.m_dovi5Loaded==newer);
-  assert(window.m_doviModulePath==(old?"/flash/dovi.ko":""));
-  assert(window.m_dovi5ModulePath==(newer?"/storage/.dovi5/generations/example/dovi5.ko":""));
+  assert(window.m_doviModuleFolder==(old?"/flash/":""));
+  assert(window.m_dovi5ModuleFolder==(newer?"/storage/.dovi5/generations/example/":""));
   const int reads=directoryReads;
   modules["/sys/module/dovi"]=!old;modules["/sys/module/dovi5"]=!newer;
   window.UpdateDVModuleStatus();assert(directoryReads==reads); // per-frame calls stay cached
@@ -303,7 +304,11 @@ int main(){
  std::remove(first);std::ofstream(second)<<"relative/candidate.ko\n";
  window.m_dvModuleStatusUpdated={};window.UpdateDVModuleStatus();
  assert(window.m_doviLoaded&&window.m_dovi5Loaded); // residency survives unknown provenance
- assert(window.m_doviModulePath.empty()&&window.m_dovi5ModulePath.empty());
+ assert(window.m_doviModuleFolder.empty()&&window.m_dovi5ModuleFolder.empty());
+ const std::string hash(61,'a');
+ std::ofstream(second)<<"/storage/.dovi5/generations/"<<hash<<"B1c/dovi5.ko\n";
+ window.m_dvModuleStatusUpdated={};window.UpdateDVModuleStatus();
+ assert(window.m_dovi5ModuleFolder=="/storage/.dovi5/generations/...B1c/"); // generation hash shows its last 3 digits
 }
 '''.replace('@ROOT@',str(tmp))
         adapted_module = module_method.replace('/run/',str(tmp)+'/')

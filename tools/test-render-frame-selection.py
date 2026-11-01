@@ -27,10 +27,11 @@ def main():
     # Preserve late geometry and main composition order. Full platform Render
     # is not emulated by this fixture; the menu block below executes verbatim.
     points = ['m_pRenderer->Update();', 'm_pRenderer->GetVideoRect(',
-              'CalcOverlayActiveArea(', 'm_overlays.SetVideoRect(',
+              'm_overlays.SetVideoRect(', 'CalcOverlayActiveArea(',
               'winSystem->RequestMenuComposite(', 'winSystem->BeginMenuOverlayRender()',
               'm_overlays.RenderPqMenu(frame->overlays)', 'winSystem->EndMenuOverlayRender()',
-              'm_overlays.Render(frame->overlays)']
+              'm_overlays.PrepareRenderItems(frame->overlays)',
+              'm_overlays.RenderPrepared(prepared, frame->overlays)']
     positions = [render.index(p) for p in points]
     assert positions == sorted(positions)
     for signature in ['bool CRenderManager::Configure()', 'void CRenderManager::PreInitOnMain()',
@@ -51,7 +52,7 @@ def main():
               .replace('@DRAW@', function(rh, 'struct PreparedVideoDraw') + ';'))
     source += function(ov, 'bool IsPqMenuImage(')
     for name in ['SetOverlays', 'Release(int', 'Release(std::vector', 'ReleaseUnused',
-                 'Render(const OverlayBatch&', 'RenderPqMenu', 'HasPqMenuOverlay',
+                 'Render(const OverlayBatch&', 'RenderPrepared', 'RenderPqMenu', 'HasPqMenuOverlay',
                  'HasOverlay', 'HasDiscMenuOverlay', 'HasTextOverlay', 'HasImageOverlay']:
         prefix = 'bool' if name.startswith('Has') else 'void'
         source += '\n' + function(ov, prefix + ' CRenderer::' + name)
@@ -64,8 +65,11 @@ def main():
     for name in ['IsGuiLayer', 'IsPresenting', 'SubmitVideoDraw']:
         source += '\n' + function(rm, 'bool CRenderManager::' + name + '(')
     start = render.index('    CWinSystemBase* winSystem =')
-    end = render.index('    m_overlays.Render(frame->overlays);', start)
-    menu_block = render[start:end + len('    m_overlays.Render(frame->overlays);')]
+    prepare = '    const auto prepared = m_overlays.PrepareRenderItems(frame->overlays);'
+    submit = '    m_overlays.RenderPrepared(prepared, frame->overlays);'
+    # The subtitle signal policy between these two statements needs the full
+    # platform context. Its own fixtures cover that policy.
+    menu_block = render[start:render.index(prepare, start) + len(prepare)] + '\n' + submit
     source += '\nvoid CRenderManager::DrawMenus() {const auto frame=m_frameSelection;\n' + menu_block + '\n}\n'
     source += TESTS
     with tempfile.TemporaryDirectory(prefix='frame-selection-test-') as temporary:
@@ -138,8 +142,13 @@ struct Renderer {
   bool RenderCapture(int i,CRenderCapture*){captureSource=i;return captureOk;}
   bool RenderUpdateVideo(int i,int p,bool c,DWORD f,DWORD a){calls.push_back({i,p,c,f,a});return true;}
 };
+bool IsPqMenuImage(const std::shared_ptr<const CDVDOverlay>& o);
 namespace OVERLAY {
-struct COverlay {const CDVDOverlay* value=nullptr;};
+struct SRenderState {};
+struct COverlay {
+  const CDVDOverlay* value=nullptr;bool m_rawPqMenu=false;std::vector<const CDVDOverlay*>* sink=nullptr;
+  void Render(SRenderState&){sink->push_back(value);}
+};
 class CRenderer {
 public:
   @ELEMENT@
@@ -147,14 +156,28 @@ public:
   CCriticalSection m_section;OverlayBatch m_buffers[NUM_BUFFERS];
   std::map<std::shared_ptr<const CDVDOverlay>,std::shared_ptr<COverlay>,
            std::owner_less<std::shared_ptr<const CDVDOverlay>>> m_textureCache;
+  struct SRenderItem {std::shared_ptr<COverlay> overlay;SRenderState state;};
+  using PreparedOverlays=std::vector<SRenderItem>;
   std::vector<const CDVDOverlay*> drawn;std::vector<double> evaluated;
+  void RenderPrepared(const PreparedOverlays&,const OverlayBatch&);
+  // Selection part of the production batch preparation: convert every overlay
+  // except raw PQ menu images while the menu composite owns them.
+  PreparedOverlays PrepareRenderItems(const OverlayBatch& overlays) {
+    auto* w=CServiceBroker::GetWinSystem();PreparedOverlays items;
+    const bool composite=w->IsMenuCompositeActive()||w->IsMenuCompositePending();
+    for(const auto& e:overlays) {
+      if(!e.overlay_dvd||(composite&&IsPqMenuImage(e.overlay_dvd)))continue;
+      if(auto o=Convert(*e.overlay_dvd,e.pts))items.push_back({o,{}});
+    }
+    return items;
+  }
   void SetOverlays(OverlayBatch,int);OverlayBatch GetOverlays(int);
   void Release(int);void Release(std::vector<SElement>&);void ReleaseUnused(const OverlayBatch& selected={});
   bool HasOverlay(const OverlayBatch&);bool HasPqMenuOverlay(const OverlayBatch&);
   bool HasDiscMenuOverlay(const OverlayBatch&);bool HasTextOverlay(const OverlayBatch&);bool HasImageOverlay(const OverlayBatch&);
   void Render(const OverlayBatch&);void RenderPqMenu(const OverlayBatch&);
   std::shared_ptr<COverlay> Convert(const CDVDOverlay& o,double pts) {
-    evaluated.push_back(pts);auto r=std::make_shared<COverlay>();r->value=&o;return r;
+    evaluated.push_back(pts);auto r=std::make_shared<COverlay>();r->value=&o;r->sink=&drawn;return r;
   }
   void Render(std::shared_ptr<COverlay> o){drawn.push_back(o->value);}
 };
@@ -193,6 +216,7 @@ struct CRenderManager {
   bool Configure(){return false;}void FrameWait(std::chrono::milliseconds){}void CheckEnableClockSync(){}
   void ManageCaptures(){}bool IsConfigured(){return m_renderState==STATE_CONFIGURED;}
   void InvalidateReservations(){} // reservation semantics exercised by the 2A fixture
+  void UpdateActivePicture(){} // published-picture geometry is covered by test-active-picture.py
   void SelectFrame();void ClearFrameSelection();void FrameMove();void ProcessPresentationQueue();void RetireBuffer(int);
   void PrepareNextRender();void DiscardBuffer();void UpdateGuiPresentationState(bool);void RenderCapture(CRenderCapture*);
   bool IsGuiLayer();bool IsPresenting();void DrawMenus();

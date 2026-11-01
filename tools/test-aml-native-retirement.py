@@ -107,6 +107,8 @@ struct CWinSystemAmlogicGLESContext:CWinSystemAmlogic,CRenderSystemGLES {
   void DisengageMenuComposite(){effects.push_back("menu-disengage");}
   void ApplyPendingKernelSwitch(){effects.push_back("shutdown-switch");}
   void CancelGuiComposite(){effects.push_back("composite-cancel");}
+  void GuiABFinish(const char*){} // GUI A/B and GUI wait are covered by their own fixtures
+  void SetNativeGuiWait(bool){}
   bool InitWindowSystem();bool PrepareForShutdown();bool DestroyWindowSystem();
   bool DestroyWindow();bool DestroyRenderSystem();
 };

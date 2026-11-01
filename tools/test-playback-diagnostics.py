@@ -97,7 +97,8 @@ struct CAMLCodec {
   CAMLSession m_session;
   std::mutex m_videoHoldMutex;
   bool m_videoHoldActive=false; uint64_t m_videoHoldProviderEpoch=0;
-  static bool ReadVideoPresentation(uint64_t&,uint64_t&) {return false;}
+  struct VideoPresentation {uint64_t epoch=0,applied=0;};
+  static bool ReadVideoPresentation(VideoPresentation&) {return false;}
   void CheckVideoHold() {}
   std::mutex m_presentationMutex;
   bool m_presentationActive=true;

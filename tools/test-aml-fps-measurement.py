@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-KERNEL = Path('/home/panni/linux-amlogic-local')
+KERNEL = Path(os.environ.get('CE_KERNEL_ROOT', Path.home() / 'linux-amlogic-local'))
 function = runpy.run_path(str(ROOT/'tools/test-aml-fps-snapshot.py'))['function']
 PRELUDE = r'''
 #include <algorithm>

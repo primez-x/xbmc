@@ -191,12 +191,14 @@ void aml_dv_engage_deferred_disc(bool,const std::shared_ptr<const void>&){
 }
 void aml_dv_engage_stale_deferred_disc(const std::shared_ptr<const void>&){++dvEffects;}
 struct Renderer {int updates=0;void Update(){++updates;}};
+struct CDataCacheCore {struct VideoActivePicture {};void SetVideoActivePicture(VideoActivePicture){}};
 struct Port {int changes=0;void VideoParamsChange(){++changes;}};
 '''
 CLASS = r'''
 struct CRenderManager {
  @RECORD@
  std::optional<AppliedResolution> m_appliedResolution;
+ CDataCacheCore m_dataCacheCore;
  CCriticalSection m_resolutionlock;bool m_bTriggerUpdateResolution=true;
  float m_fps=24.f;StreamHdrType m_hdrType_override=StreamHdrType::HDR_TYPE_NONE;
  struct {std::string stereoMode;StreamHdrType hdrType=StreamHdrType::HDR_TYPE_DOLBYVISION;

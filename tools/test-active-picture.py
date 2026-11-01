@@ -2,7 +2,7 @@
 """Execute production picture projection, publication, GUI transform and label.
 
 Host service/renderer/native-lifecycle substitutes; no GUI/device/HDMI claim.
-Requires g++, fmt headers (FMT_INCLUDE if absent from /usr/include).
+Requires g++ and fmt headers. FMT_INCLUDE overrides the libfmt found in the firmware build tree.
 """
 
 import json
@@ -292,7 +292,8 @@ int main(){
 def main():
     with tempfile.TemporaryDirectory(prefix='active-picture-test-') as tmp:
         out = Path(tmp)
-        fmt_include = Path(os.environ.get('FMT_INCLUDE', '/usr/include'))
+        build = Path(os.environ.get('CE_BUILD_DIR', Path.home() / 'p3i/build.CoreELEC-Amlogic-ng.arm-21/build'))
+        fmt_include = Path(os.environ.get('FMT_INCLUDE') or next(build.glob('libfmt-*/include'), '/usr/include'))
         shutil.copytree(fmt_include / 'fmt', out / 'fmt')
         (out / 'PlatformDefs.h').write_text('#pragma once\n')
         (out / 'test.cpp').write_text(harness() + TESTS)

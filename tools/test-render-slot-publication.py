@@ -150,6 +150,7 @@ struct CServiceBroker {
   static Window* GetWinSystem(){static Window w;return &w;}
 };
 struct Clock {double GetClock() const{return 1.0;}};
+struct CDataCacheCore {struct VideoActivePicture {};void SetVideoActivePicture(VideoActivePicture){}void SetRenderPts(double){}};
 struct RefBuffer {int refs=1;void Acquire(){++refs;}void Release(){assert(refs>0);--refs;}};
 struct Light {int MaxCLL=0;};
 struct VideoPicture {
@@ -225,6 +226,7 @@ public:
   std::deque<int> m_free,m_queued,m_discard;
   Renderer renderer;Renderer* m_pRenderer=&renderer;
   OVERLAY::CRenderer m_overlays,m_debugRenderer;
+  CDataCacheCore m_dataCacheCore;
   Clock m_dvdClock;Condition m_presentevent;Event m_flushEvent;
   XbmcThreads::EndTime<> m_presentTimer;
   EPRESENTSTEP m_presentstep=PRESENT_IDLE;

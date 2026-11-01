@@ -2,8 +2,9 @@
 """Exercise real passthrough parsing/emission and dialnorm labels on the host.
 
 The parser is compiled whole; only logging is stubbed. Synthetic headers do not
-establish decoder/receiver behavior. Set FFMPEG_INCLUDE to an FFmpeg include
-folder if its headers are not installed. --baseline REV also compares every
+establish decoder/receiver behavior. FFMPEG_INCLUDE and FMT_INCLUDE override the
+FFmpeg and libfmt headers found in the firmware build tree (CE_BUILD_DIR). Only the
+libavutil headers are read; link against the host libavutil. --baseline REV also compares every
 emitted byte against that revision, with identical existing defeat switches.
 """
 import argparse
@@ -198,7 +199,8 @@ def main():
     args = argparse.ArgumentParser()
     args.add_argument('--baseline')
     opts = args.parse_args()
-    include = Path(os.environ.get('FFMPEG_INCLUDE', '/usr/include/x86_64-linux-gnu'))
+    build = Path(os.environ.get('CE_BUILD_DIR', Path.home() / 'p3i/build.CoreELEC-Amlogic-ng.arm-21/build'))
+    include = Path(os.environ.get('FFMPEG_INCLUDE') or next(build.glob('ffmpeg-*'), '/usr/include/x86_64-linux-gnu'))
     library = os.environ.get('AVUTIL_LIBRARY') or ctypes.util.find_library('avutil')
     if not library:
         raise SystemExit('Host libavutil is required')
@@ -239,7 +241,7 @@ struct CLog { template<typename... T> static void Log(int, const char*, const T&
             'std::string CDataCacheCore::GetAudioDialNorm(',
             'void CDataCacheCore::ResetAudioCache('))
         audio_info = block((ROOT / 'xbmc/cores/DataCacheCore.h').read_text(), 'struct SPlayerAudioInfo')
-        fmt_include = Path(os.environ.get('FMT_INCLUDE', str(include)))
+        fmt_include = Path(os.environ.get('FMT_INCLUDE') or next(build.glob('libfmt-*/include'), include))
         shutil.copytree(fmt_include / 'fmt', temp / 'fmt')
         fixture = r'''
 #include <cassert>

@@ -194,17 +194,24 @@ def verify(gl, helper, fragments, baseline, full=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-ref', default='58aafcddf7ec471961bac4aa7405e9a99e4296a7')
+    parser.add_argument('--baseline-ref', default='origin/aml-4.9-21.3')
     parser.add_argument('--mutations', action='store_true')
     args = parser.parse_args()
     helper = (SHADERS / 'gui_colour.frag').read_text()
     fragments = {name: (SHADERS / f'gles_shader_{name}.frag').read_text() for name in NAMES}
     baseline = {name: subprocess.check_output(['git', 'show', f'{args.baseline_ref}:system/shaders/GLES/2.0/gles_shader_{name}.frag'], cwd=ROOT, text=True) for name in NAMES}
-    # Dedicated subtitle fonts, video and the final PGS/GUI compositor remain byte-identical.
+    # Upstream has no bitmap subtitle colour controls. Their fragment without the GUI hook is the parent oracle.
+    hook = '#if defined(KODI_GUI_COLOUR) && !defined(KODI_PQ_TO_SDR)\n  rgb.rgb = guiColour(rgb.rgb);\n#endif\n\n'
+    assert fragments['texture_noblend'].count(hook) == 1
+    baseline['texture_noblend'] = fragments['texture_noblend'].replace(hook, '')
+    # Dedicated subtitle fonts and video remain byte-identical.
     for path in ('system/shaders/GLES/2.0/gles_shader_fonts_subtitle.frag',
-                 'system/shaders/GLES/2.0/gles_shader_rgba.frag',
-                 'xbmc/rendering/gles/GuiCompositeShaderGLES.cpp'):
+                 'system/shaders/GLES/2.0/gles_shader_rgba.frag'):
         assert (ROOT / path).read_text() == subprocess.check_output(['git', 'show', f'{args.baseline_ref}:{path}'], cwd=ROOT, text=True), path
+    # Upstream has no final PGS/GUI compositor. Check that GUI tuning never reaches the compositor.
+    for path in ('system/shaders/GLES/2.0/gles_gui_composite.frag', 'system/shaders/GLES/2.0/gles_gui_composite.vert',
+                 'xbmc/rendering/gles/GuiCompositeShaderGLES.cpp'):
+        assert 'guiColour' not in (ROOT / path).read_text() and 'gui_colour' not in (ROOT / path).read_text(), path
     os.environ.setdefault('EGL_PLATFORM', 'surfaceless')
     os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE', '1')
     os.environ.setdefault('MESA_SHADER_CACHE_DISABLE', 'true')

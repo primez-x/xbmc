@@ -50,8 +50,10 @@ def main():
         methods.append(function(aml, 'void CRendererAML::RenderUpdate('))
     else:
         methods.append(function(aml, 'void CRendererAML::RenderUpdate('))
+    poll = 'bool' if 'bool CAMLVideoBuffer::Poll(' in codec else 'void'
+    source = source.replace('@POLL_TYPE@', poll)
     for name in ['Commit', 'Poll', 'ApplyGeometry']:
-        methods.append(function(codec, 'void CAMLVideoBuffer::' + name + '('))
+        methods.append(function(codec, (poll if name == 'Poll' else 'void') + ' CAMLVideoBuffer::' + name + '('))
     # Use the producer's production wake condition with a minimal queue writer.
     producer = function(rm, 'bool CRenderManager::AddVideoPicture(')
     wake = function(producer, '  if (m_presentstep == PRESENT_IDLE)')
@@ -136,7 +138,7 @@ struct CAMLCodec {
  bool IsPresentationPermit(const CAMLSession::Permit& p,uint64_t){return bool(p);}
  void ReleaseFrame(int i,uint64_t,const CAMLSession::Permit&){++submissions;returned.push_back(i);}
  void SetVideoRect(const CRect&,const CRect&,uint64_t,const CAMLSession::Permit&){++geometry;}
- void PollFrame(const CAMLSession::Permit&){++polls;}
+ int PollFrame(const CAMLSession::Permit&){++polls;return 1;}
 };
 struct CVideoBuffer{virtual ~CVideoBuffer()=default;};
 struct CAMLVideoBuffer:CVideoBuffer {
@@ -147,7 +149,7 @@ struct CAMLVideoBuffer:CVideoBuffer {
  bool WasSubmitted()const{return m_submitted;}
  CAMLSession::Permit AcquirePresentation(){return m_codec->AcquirePresentation(m_operationEpoch);}
  void Commit(const CAMLSession::Permit&,const CRect&,const CRect&,int&);
- void Poll(const CAMLSession::Permit&)const;void ApplyGeometry(const CAMLSession::Permit&,const CRect&,const CRect&);
+ @POLL_TYPE@ Poll(const CAMLSession::Permit&)const;void ApplyGeometry(const CAMLSession::Permit&,const CRect&,const CRect&);
 };
 struct CRendererAML {
  struct Buffer{CVideoBuffer* videoBuffer=nullptr;};Buffer m_buffers[8];

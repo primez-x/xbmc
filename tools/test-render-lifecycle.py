@@ -479,7 +479,12 @@ def main():
              'CSingleExit graphics(CServiceBroker::GetWinSystem()->GetGfxContext());', ''),
             ('delayed configure payload corrupted', 'payload->CopyRef(picture);',
              'payload->CopyRef(picture); payload->iWidth += 1;'),
-            ('failed configure accepted as unchanged', 'm_renderState == STATE_CONFIGURED && ', ''),
+            # The renderer null check also rejects this retry, so the control removes both guards.
+            ('failed configure accepted as unchanged',
+             'm_renderState == STATE_CONFIGURED && m_picture.IsSameParams(picture) && m_fps == fps && m_orientation == orientation &&\n'
+             '        m_NumberBuffers == buffers && m_pRenderer != nullptr &&',
+             'm_picture.IsSameParams(picture) && m_fps == fps && m_orientation == orientation &&\n'
+             '        m_NumberBuffers == buffers &&'),
             ('failed configure leaves presentation pending',
              'm_renderState = STATE_UNCONFIGURED;\n    m_presentstep = PRESENT_IDLE;',
              'm_renderState = STATE_UNCONFIGURED;'),
@@ -549,7 +554,8 @@ struct Graphics
 };
 using CGraphicContext = Graphics;
 struct Window { Graphics graphics; Graphics& GetGfxContext() { return graphics; } };
-struct Cache { void Reset() { trace.push_back("cache-reset"); } };
+struct Cache { struct VideoActivePicture {}; void Reset() { trace.push_back("cache-reset"); }
+  void SetVideoActivePicture(VideoActivePicture) {} };
 enum class StreamHdrType {NONE};
 struct CStreamDetails { static int DynamicRangeToString(StreamHdrType) { return 0; } };
 struct VideoPicture
@@ -621,6 +627,7 @@ struct CRenderManager
   std::atomic<bool> m_closing{false};
   std::recursive_mutex m_statelock;
   uint64_t m_lifecycleGeneration{0};
+  Cache& m_dataCacheCore{CServiceBroker::GetDataCacheCore()};
   bool flushResult{true};
   enum { PRESENT_IDLE, PRESENT_READY, STATE_UNCONFIGURED, STATE_CONFIGURING, STATE_CONFIGURED };
   std::shared_ptr<CRenderLifecycle::Request> m_configRequest;

@@ -34,8 +34,10 @@ def harness(revision=None):
     aml_header = source_at(directory + 'HwDecRender/RendererAML.h', revision)
     prepared = 'struct PreparedVideoDraw' in header
     gateway = 'buffer->AcquirePresentation()' in aml
+    bool_submit = 'bool CRenderManager::SubmitVideoDraw(' in manager
     source = PRELUDE.replace('@PREPARED@', '1' if prepared else '0')
     source = source.replace('@GATEWAY@', '1' if gateway else '0')
+    source = source.replace('@SUBMIT_TYPE@', 'bool' if bool_submit else 'void')
     buffer_methods = ''
     if gateway:
         buffer_header = source_at('xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h', revision)
@@ -43,7 +45,8 @@ def harness(revision=None):
         # Expose only state inspection to preserve accepted consumed-marker asserts.
         buffer_class = function(buffer_header, 'class CAMLVideoBuffer :').replace('private:', 'public:') + ';'
         for signature in ['void CAMLVideoBuffer::Set(', 'CAMLSession::Permit CAMLVideoBuffer::AcquirePresentation()',
-                          'void CAMLVideoBuffer::Commit(', 'void CAMLVideoBuffer::Poll(',
+                          'void CAMLVideoBuffer::Commit(',
+                          ('bool ' if 'bool CAMLVideoBuffer::Poll(' in buffer_source else 'void ') + 'CAMLVideoBuffer::Poll(',
                           ('bool ' if 'bool CAMLVideoBuffer::Drop()' in buffer_source else 'void ') + 'CAMLVideoBuffer::Drop()']:
             buffer_methods += '\n' + function(buffer_source, signature)
         if 'void CAMLVideoBuffer::ApplyGeometry(' in buffer_source:
@@ -58,17 +61,21 @@ def harness(revision=None):
     source = source.replace('@PASS@', function(header, 'struct VideoRenderPass') + ';' if prepared else '')
     source = source.replace('@DRAW@', function(header, 'struct PreparedVideoDraw') + ';' if prepared else '')
     source = source.replace('@GEOMETRY@', function(aml_header, 'struct PreparedVideoGeometry') + ';' if prepared else '')
+    if 'bool TextSubtitleNeedsSignal(' in manager:
+        source += '\n' + function(manager, 'bool TextSubtitleNeedsSignal(')
     for signature in ['void CRenderManager::Render(bool', 'void CRenderManager::RenderCapture(']:
         source += '\n' + function(manager, signature)
     if prepared:
         source += '\n' + function(manager, 'CRenderManager::PreparedVideoDraw CRenderManager::PrepareVideoDraw(')
-        source += '\n' + function(manager, 'void CRenderManager::SubmitVideoDraw(')
+        source += '\n' + function(manager, ('bool' if bool_submit else 'void') + ' CRenderManager::SubmitVideoDraw(')
     else:
         for name in ['PresentSingle', 'PresentFields', 'PresentBlend']:
             source += '\n' + function(manager, 'void CRenderManager::' + name + '(')
     signatures = ['void CRendererAML::RenderUpdate(', 'bool CRendererAML::RenderCapture(']
     if gateway:
         signatures += ['bool CRendererAML::Configure(']
+    if bool_submit:
+        signatures += ['bool CRendererAML::RenderUpdateVideo(']
     if not gateway:
         signatures += ['void CRendererAML::CommitVideoLayer(', 'void CRendererAML::PollVideoLayer()']
     for signature in signatures:
@@ -147,15 +154,20 @@ struct Data{
   struct Metadata{bool has_level5_metadata=false;uint16_t level5_active_area_top_offset=0,level5_active_area_bottom_offset=0;};
   Metadata GetVideoDoViFrameMetadata(){return {};}
 };
-struct Settings{Settings* GetSubtitlesSettings(){return this;}float GetVerticalMarginPerc(){return 5.0f;}};
+bool restrictActive=false;int signalMode=0;
+struct CSettings{static constexpr int SETTING_COREELEC_AMLOGIC_DV_RESTRICT_SUBS_ACTIVE_AREA=1;};
+struct Settings{
+  Settings* GetSubtitlesSettings(){return this;}float GetVerticalMarginPerc(){return 5.0f;}
+  Settings* GetSettings(){return this;}bool GetBool(int){event("active-setting");return restrictActive;}
+};
 struct CServiceBroker{
   static Window* GetWinSystem(){static Window w;return &w;}
   static Data& GetDataCacheCore(){static Data d;return d;}
   static Settings* GetSettingsComponent(){static Settings s;return &s;}
 };
 struct CSingleExit{explicit CSingleExit(Gfx&){event("gfx-exit");}~CSingleExit(){event("gfx-restore");}};
-bool restrictActive=false;int signalMode=0;
 bool aml_dv_use_active_area(){event("active-setting");return restrictActive;}
+bool aml_subtitle_native_dv(){return true;}
 int aml_dv_l5_subs_signal_mode(){event("signal-setting");return signalMode;}
 bool aml_dv_auto_letterbox_get(uint16_t&,uint16_t&,uint16_t&,uint16_t&){return false;}
 bool aml_dv_auto_letterbox_additive(){return false;}
@@ -189,10 +201,12 @@ struct Renderer{
   bool IsGuiLayer(){event(gui?"gui-layer":"video-layer");return gui;}
   void Update(){event("update");dest={float(++revision),20,1000,600};}
   void GetVideoRect(CRect& s,CRect& d,CRect& v){event("get-rect");s=source;d=dest;v=view;}
-  void RenderUpdate(int sourceIndex,int past,bool clear,unsigned flags,unsigned alpha){
+  bool RenderUpdateVideo(int sourceIndex,int past,bool clear,unsigned flags,unsigned alpha){
     event("draw:"+std::to_string(sourceIndex)+":"+std::to_string(past)+":"+std::to_string(clear)+":"+std::to_string(flags)+":"+std::to_string(alpha));
     if(drawHook)drawHook();
+    return true;
   }
+  void RenderUpdate(int sourceIndex,int past,bool clear,unsigned flags,unsigned alpha){RenderUpdateVideo(sourceIndex,past,clear,flags,alpha);}
   DEBUG_INFO_VIDEO GetDebugInfo(int){return {};}
   bool RenderCapture(int index,CRenderCapture*){event("capture-source:"+std::to_string(index));return captureOk;}
 };
@@ -202,11 +216,14 @@ namespace OVERLAY{struct CRenderer{
   bool HasOverlay(const OverlayBatch&){event("has-overlay");return true;}
   bool HasTextOverlay(const OverlayBatch&){return true;}
   bool HasImageOverlay(const OverlayBatch&){return true;}
-  bool HasImageSubOutsideActiveArea(const OverlayBatch&,int,int){return false;}
+  using PreparedOverlays=std::vector<int>;
+  bool HasImageSubOutsideActiveArea(const PreparedOverlays&,const CRect&){return false;}
   bool HasPqMenuOverlay(const OverlayBatch&){return true;}
   void SetVideoRect(CRect& s,CRect& d,CRect& v){event("overlay-rect:"+rect(s)+":"+rect(d)+":"+rect(v));}
   void RenderPqMenu(const OverlayBatch&){event("pq-menu");}
   void Render(const OverlayBatch&){event("overlay");if(overlayHook)overlayHook();}
+  PreparedOverlays PrepareRenderItems(const OverlayBatch&){event("overlay-prepare");return {};}
+  void RenderPrepared(const PreparedOverlays&,const OverlayBatch&){event("overlay");if(overlayHook)overlayHook();}
 };}
 struct CRenderManager{
   @EPRESENTSTEP@
@@ -228,11 +245,12 @@ struct CRenderManager{
   struct{double m_syncOffset=0;}m_clockSync;
   double m_displayLatency=0,m_audioLatencyTweak=0,m_latencyTweak=0;
   Clock m_dvdClock;Port port;Port* m_playerPort=&port;
-  void CalcOverlayActiveArea(CRect& s,CRect& d,CRect& v,bool use){event("active-rect:"+rect(s)+":"+rect(d)+":"+rect(v)+":"+std::to_string(use));}
+  CRect CalcOverlayActiveArea(CRect& s,CRect& d,CRect& v,bool use,double){event("active-rect:"+rect(s)+":"+rect(d)+":"+rect(v)+":"+std::to_string(use));return d;}
+  CRect CalcPictureActiveArea(const CRect& s,const CRect& d,const CRect& v,double,bool){event("picture-rect:"+rect(s)+":"+rect(d)+":"+rect(v));return d;}
   void Render(bool,DWORD,DWORD,bool);void RenderCapture(CRenderCapture*);
 #if PREPARED
   static PreparedVideoDraw PrepareVideoDraw(const FrameSelection&,EPRESENTSTEP,bool,DWORD,DWORD);
-  void SubmitVideoDraw(const PreparedVideoDraw&);
+  @SUBMIT_TYPE@ SubmitVideoDraw(const PreparedVideoDraw&);
 #else
   void PresentSingle(const FrameSelection&,bool,DWORD,DWORD);
   void PresentFields(const FrameSelection&,bool,DWORD,DWORD);
@@ -255,7 +273,7 @@ struct CAMLCodec{
     event(std::string(drop?"drop:":"release:")+std::to_string(index)+":"+std::to_string(generation));if(releaseHook)releaseHook();return 0;}
   void SetVideoRect(const CRect& s,const CRect& d,uint64_t generation,const CAMLSession::Permit& permit){
     assert(session.Matches(permit,session.Epoch()));event("aml-rect:"+rect(s)+":"+rect(d)+":"+std::to_string(generation));}
-  void PollFrame(const CAMLSession::Permit& permit){assert(session.Matches(permit,session.Epoch()));event("poll");if(pollHook)pollHook();}
+  int PollFrame(const CAMLSession::Permit& permit){assert(session.Matches(permit,session.Epoch()));event("poll");if(pollHook)pollHook();return 1;}
 #else
   int ReleaseFrame(int index,uint64_t generation){event("release:"+std::to_string(index)+":"+std::to_string(generation));if(releaseHook)releaseHook();return 0;}
   void SetVideoRect(const CRect& s,const CRect& d,uint64_t generation){event("aml-rect:"+rect(s)+":"+rect(d)+":"+std::to_string(generation));}
@@ -316,6 +334,7 @@ struct CRendererAML{
   CRect m_sourceRect,m_destRect;
   void ManageRenderArea(){event("prepare");m_sourceRect={0,0,1920,1080};m_destRect={float(++revision),20,1000,600};}
   void RenderUpdate(int,int,bool,unsigned,unsigned);
+  @SUBMIT_TYPE@ RenderUpdateVideo(int,int,bool,unsigned,unsigned);
 #if PREPARED
   PreparedVideoGeometry PrepareVideoLayer();
 #if !GATEWAY
@@ -382,7 +401,9 @@ int main(){
     for(int i=0;i<2;++i){r.Render(false,0,255,true);dump();}
     // Completion reads current live step, not the step used for drawing.
     r.m_overlays.overlayHook=[&]{r.m_presentstep=CRenderManager::PRESENT_FRAME2;};
-    r.Render(false,0,255,true);assert(r.m_presentstep==CRenderManager::PRESENT_IDLE);dump();
+    // A GUI-only pass over a hardware video layer cannot complete the frame; the later video pass can.
+    r.Render(false,0,255,true);assert(r.m_presentstep==(guiLayer?CRenderManager::PRESENT_IDLE:CRenderManager::PRESENT_FRAME2));dump();
+    if(!guiLayer){r.Render(false,0,255,false);assert(r.m_presentstep==CRenderManager::PRESENT_IDLE);dump();}
     r.renderer.drawHook=[] {throw std::runtime_error("backend");};
     r.m_presentstep=CRenderManager::PRESENT_FRAME;
     try{r.Render(true,0,255,false);assert(guiLayer);}catch(const std::runtime_error&){}

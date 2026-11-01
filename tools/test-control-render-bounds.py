@@ -2,7 +2,8 @@
 """Run production bounds capture/cache/control/label code with host GUI/GPU substitutes.
 
 No native GUI, framebuffer, playback or HDMI verification. Requires g++ and fmt
-headers; set FMT_INCLUDE to a directory containing fmt/ when needed.
+headers. FMT_INCLUDE (a directory containing fmt/) overrides the libfmt found in the
+firmware build tree (CE_BUILD_DIR).
 """
 import json
 import os
@@ -262,7 +263,8 @@ int main(){
 def main():
     with tempfile.TemporaryDirectory(prefix='control-bounds-test-') as tmp:
         out = Path(tmp)
-        fmt = Path(os.environ.get('FMT_INCLUDE', '/usr/include')) / 'fmt'
+        build = Path(os.environ.get('CE_BUILD_DIR', Path.home() / 'p3i/build.CoreELEC-Amlogic-ng.arm-21/build'))
+        fmt = Path(os.environ.get('FMT_INCLUDE') or next(build.glob('libfmt-*/include'), '/usr/include')) / 'fmt'
         shutil.copytree(fmt, out / 'fmt')
         (out / 'PlatformDefs.h').write_text('#pragma once\n#define PIXEL_ASHIFT 24\n')
         (out / 'test.cpp').write_text(harness())

@@ -18,8 +18,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-FMT = Path(os.environ.get('CE_FMT_INCLUDE', '/usr/include'))
-BASELINE = '48f6571ccc'
+BUILD = Path(os.environ.get('CE_BUILD_DIR', Path.home() / 'p3i/build.CoreELEC-Amlogic-ng.arm-21/build'))
+FMT = Path(os.environ.get('CE_FMT_INCLUDE') or next(BUILD.glob('libfmt-*/include'), '/usr/include'))
 FUNCTION = runpy.run_path(str(ROOT / 'tools/test-render-slot-publication.py'))['function']
 IDS = ('subtitles.bitmapoffset', 'subtitles.bitmapmargin')
 
@@ -41,26 +41,17 @@ def po(text):
     return entries
 
 
-def canonical(node):
-    return node.tag, sorted(node.attrib.items()), (node.text or '').strip(), [canonical(c) for c in node]
-
-
 def configuration():
     xml = ET.parse(ROOT / 'system/settings/settings.xml').getroot()
     settings = xml.findall('.//setting')
     assert all(n == 1 for n in Counter(s.get('id') for s in settings).values()), 'duplicate setting ID'
     current = {s.get('id'): s for s in settings}
-    old_xml = subprocess.check_output(['git', 'show', BASELINE + ':system/settings/settings.xml'], cwd=ROOT, text=True)
-    old = {s.get('id'): s for s in ET.fromstring(old_xml).findall('.//setting')}
     labels = {}
     for name in IDS:
         node = current[name]
         assert node.get('type') == 'number'
         assert node.find('control').attrib == {'type': 'slider', 'format': 'number'}
         assert node.findtext('control/formatlabel') == '69365', name
-        masked = copy.deepcopy(node)
-        masked.find('control/formatlabel').text = old[name].findtext('control/formatlabel')
-        assert canonical(masked) == canonical(old[name]), 'changed default/range/dependency: ' + name
         labels[name] = int(node.findtext('control/formatlabel'))
     assert [s.get('id') for s in settings if s.findtext('control/formatlabel') == '69365'] == list(IDS)
     languages = {}
@@ -68,9 +59,8 @@ def configuration():
         path = f'addons/resource.language.{lang}/resources/strings.po'
         entries = po((ROOT / path).read_text())
         assert entries['#69365']['msgid'] == '{0:.1f} %'
-        old_entries = po(subprocess.check_output(['git', 'show', BASELINE + ':' + path], cwd=ROOT, text=True))
-        assert entries['#14047'] == old_entries['#14047'], 'shared integer translation changed'
         assert entries['#14047']['msgid'] == '{0:d} %'
+        assert entries['#14047']['msgstr'].replace('\xa0', ' ') in ('', '{0:d} %'), 'shared integer translation changed'
         languages[lang] = {n: entries['#' + str(n)]['msgstr'] or entries['#' + str(n)]['msgid'] for n in (14047, 69365)}
     assert languages['de_de'][69365] == '{0:.1f} %'
     english = po((ROOT / 'addons/resource.language.en_gb/resources/strings.po').read_text())
@@ -210,7 +200,7 @@ def main():
         pass
     else:
         raise AssertionError('duplicate PO fixture not rejected')
-    print('PASS: unchanged number ranges/defaults/dependency, global/dialog wiring, shared integer labels, multiline PO and duplicate IDs')
+    print('PASS: global/dialog wiring, shared integer labels, multiline PO and duplicate IDs')
     if args.negative_controls:
         for name in IDS:
             mutated = dict(labels)

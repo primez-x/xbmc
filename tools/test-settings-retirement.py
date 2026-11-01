@@ -142,8 +142,10 @@ void registration_cases(){
   dispatch(manager,2);assert(policy[0].calls==2 && policy[1].calls==2);
 }
 enum TV_PRESET{TV_PRESET_MANUAL,TV_PRESET_AUTO,TV_PRESET_LG,TV_PRESET_SONY,TV_PRESET_SAMSUNG,TV_PRESET_PANASONIC,TV_PRESET_PHILIPS,TV_PRESET_TCL};
-enum DV_TYPE{DV_TYPE_DISPLAY_LED,DV_TYPE_PLAYER_LED_LLDV,DV_TYPE_PLAYER_LED_HDR2,DV_TYPE_VS10_ONLY};
-enum DV_MODE{DV_MODE_OFF,DV_MODE_ON_DEMAND};
+enum DV_TYPE{DV_TYPE_DISPLAY_LED=0,DV_TYPE_PLAYER_LED_LLDV=1,DV_TYPE_PLAYER_LED_HDR=2,DV_TYPE_VS10_ONLY=3,DV_TYPE_PLAYER_LED_HDR2=4};
+enum DV_MODE{DV_MODE_ON=0,DV_MODE_ON_DEMAND=1,DV_MODE_OFF=2};
+constexpr int DOLBY_VISION_OUTPUT_MODE_IPT=0,DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL=1;
+bool aml_dv_new_backend_available(){return true;}
 constexpr int LOGINFO=1, LOGERROR=2;
 struct CLog{template<class...T>static void Log(T&&...){}};
 struct AMLDVCapability {std::string edid_pnpid="test";};
@@ -201,6 +203,8 @@ struct CWinSystemAmlogicGLESContext {
   CAMLDisplayLifecycle m_displayLifecycle;
   std::unique_ptr<CAMLDisplayLifecycle::Mutation> m_shutdownAdmission;
   bool RetireNativeTransactions(){return dv->Retire();}
+  void GuiABFinish(const char*){}
+  void SetNativeGuiWait(bool){}
   bool PrepareForShutdown();
 };
 @WINDOW@

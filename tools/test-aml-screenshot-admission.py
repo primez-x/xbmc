@@ -41,6 +41,7 @@ def harness():
 
 PRELUDE = r'''
 #include "cores/VideoPlayer/DVDCodecs/Video/AMLSession.h"
+#include "utils/PlaybackDiagnostics.h"
 #include "utils/ScreenshotAML.h"
 #include <array>
 #include <cassert>
@@ -53,6 +54,8 @@ PRELUDE = r'''
 #include <unistd.h>
 using namespace std::chrono_literals;
 using CCriticalSection = std::recursive_mutex;
+constexpr int LOGDEBUG=1;
+struct CLog{template<class...T> static void Log(int,const char*,T&&...){}};
 class CAMLCodec
 {
 public:

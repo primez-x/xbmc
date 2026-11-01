@@ -79,7 +79,7 @@ struct CAMLPresenterSession {std::shared_ptr<Queue> queue=std::make_shared<Queue
   template<class A,class B> CAMLPresenterSession(int,int,int,bool,A,B){}
 };
 struct Port {void UpdateClockSync(bool){}};
-struct Cache {void SetRenderPts(double){}};
+struct Cache {void SetRenderPts(double){} struct VideoActivePicture{}; void SetVideoActivePicture(const VideoActivePicture&){}};
 struct CRenderManager {
  CCriticalSection m_statelock,m_presentlock,m_datalock;
  int m_renderState=STATE_UNCONFIGURED,m_QueueSize=0,m_QueueSkip=0,m_presentstep=0;
