@@ -484,15 +484,17 @@ bool CApplicationPlayer::SeekWaitingItem(int64_t time, bool relative)
   // A newer item that waits for the close of the old player opens at the time
   // of the seek, like a new request for the time: the players read the start
   // time (VideoPlayer, UPnP) or the start offset of the item (PAPlayer). A
-  // relative seek from a start in percent needs the length of the item, and the
-  // start offset of a cue sheet track is the start of the track: these seeks
-  // drop, like the other seeks, which need the opened item.
+  // relative seek from a start in percent needs the length of the item, the
+  // start offset of a cue sheet track is the start of the track, and the saved
+  // player state of a disc holds the position, which a start time of 0 does not
+  // replace: these seeks drop, like the other seeks, which need the opened item.
   std::unique_lock<CCriticalSection> lock(m_playerLock);
   if (!m_nextItem.pItem)
     return false;
   CPlayerOptions& options = m_nextItem.options;
   CFileItem& item = *m_nextItem.pItem;
-  if ((relative && options.startpercent > 0.0) || item.HasProperty("item_start"))
+  if ((relative && options.startpercent > 0.0) || item.HasProperty("item_start") ||
+      !options.state.empty())
     return true;
   options.starttime = std::max(0.0, (relative ? options.starttime : 0.0) + time / 1000.0);
   options.startpercent = 0.0;

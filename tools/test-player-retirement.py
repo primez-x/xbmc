@@ -148,11 +148,13 @@ static void speed_after_replacement(){
 // A newer item that waits for the close of the old player takes the time of an
 // absolute or relative seek, like a new request for the time: the start time
 // (VideoPlayer, UPnP) and the start offset of the item (PAPlayer). A relative
-// seek from a start in percent and a seek in a cue sheet track drop, like the
-// other seeks, which need the opened item.
+// seek from a start in percent, a seek in a cue sheet track and a seek in an
+// item with a saved player state (the disc position) drop, like the other
+// seeks, which need the opened item.
 static void seek_waiting_item(){
-  for(int kind=0;kind<3;++kind){
+  for(int kind=0;kind<4;++kind){
    CPlayerOptions options;options.starttime=kind==1?0:20;options.startpercent=kind==1?40:0;
+   if(kind==3)options.state="disc";
    CPlayerCoreFactory factory;IPlayerCallback callback;
    CApplicationPlayer app;auto old=std::make_shared<IPlayer>();old->playing=true;app.m_pPlayer=old;
    app.m_waitForPlaybackStop=true;assert(!app.ClosePlayer());
@@ -170,15 +172,15 @@ static void seek_waiting_item(){
     app.SeekTime(30000);assert(next.options.startpercent==0&&next.options.starttime==30&&next.pItem->startOffset==30000);
     app.SeekTimeRelative(5000);
    }
-   if(kind==2){
-    app.SeekTime(50000);app.SeekTimeRelative(5000);
-    assert(next.options.starttime==20&&next.pItem->startOffset==20000);
+   if(kind>=2){
+    app.SeekTime(0);app.SeekTime(50000);app.SeekTimeRelative(-5000);
+    assert(next.options.starttime==20&&next.pItem->startOffset==20000&&next.options.state==(kind==3?"disc":""));
    }
    assert(old->controls==0);
    old->canClose=true;app.OnPlaybackStopped();app.ContinueClose();app.OpenNext(factory);
    auto current=app.GetInternal();
    assert(current&&current!=old&&current->lastItem==2&&current->controls==0);
-   assert(current->startTime==(kind==2?20:35)&&current->startOffset==(kind==2?20000:35000)&&current->startPercent==0);
+   assert(current->startTime==(kind>=2?20:35)&&current->startOffset==(kind>=2?20000:35000)&&current->startPercent==0);
   }
 }
 // A stopped player that closes is not playing. A newer open that waits for the
@@ -307,7 +309,7 @@ def main():
     code = '#include <cmath>\n' + code
     # The playback controls of the router and the players; other harnesses share the prelude.
     for anchor, stubs in (('struct IPlayer {', 'struct CAction {int GetID()const{return 0;}};\nstruct IPlayer {' + CONTROLS_PLAYER),
-                          ('struct CPlayerOptions {};', 'struct CPlayerOptions {double startpercent=0,starttime=0;};'),
+                          ('struct CPlayerOptions {};', 'struct CPlayerOptions {double startpercent=0,starttime=0;std::string state;};'),
                           ('struct CFileItem {int id=0;', 'struct CFileItem {int id=0;int64_t startOffset=0;bool cue=false;'
                            'void SetStartOffset(int64_t o){startOffset=o;}int64_t GetStartOffset()const{return startOffset;}'
                            'bool HasProperty(const std::string& p)const{return cue&&p=="item_start";}'),

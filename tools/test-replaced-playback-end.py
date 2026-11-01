@@ -1096,7 +1096,7 @@ int main(){""", 1)
                         'bool SeekTimeRelative(int64_t t){seekLog.push_back("rel"+std::to_string(t));return true;}', 1)
     assert base.count('struct CPlayerOptions {bool fullscreen=false;};')==1
     base = base.replace('struct CPlayerOptions {bool fullscreen=false;};',
-                        'struct CPlayerOptions {bool fullscreen=false;double startpercent=0,starttime=0;};', 1)
+                        'struct CPlayerOptions {bool fullscreen=false;double startpercent=0,starttime=0;std::string state;};', 1)
     base = base.replace('struct CApplicationPlayer {', 'struct CApplicationPlayer {mutable std::function<void()> canSeekHook;'
                         'bool CanSeek()const{if(canSeekHook){auto hook=std::move(canSeekHook);hook();}return true;}'
                         'void SeekTime(int64_t);void SeekTimeRelative(int64_t);bool SeekWaitingItem(int64_t,bool);'
