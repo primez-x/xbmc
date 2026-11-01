@@ -50,23 +50,20 @@ void CApplicationStackHelper::OnPlayBackStarted(const CFileItem& item)
 {
   std::unique_lock<CCriticalSection> lock(m_critSection);
 
-  // time to clean up stack map
-  if (!HasRegisteredStack(item))
-    m_stackmap.clear();
-  else
+  // time to clean up stack map. The player can report the start of an older item
+  // after the main thread accepted a newer stack: the registrations of the
+  // current stack stay.
+  const auto stack = HasRegisteredStack(item) ? GetRegisteredStack(item) : nullptr;
+  Stackmap::iterator itr = m_stackmap.begin();
+  while (itr != m_stackmap.end())
   {
-    auto stack = GetRegisteredStack(item);
-    Stackmap::iterator itr = m_stackmap.begin();
-    while (itr != m_stackmap.end())
+    if ((stack && itr->second->m_pStack == stack) || m_currentStack->Contains(itr->first))
     {
-      if (itr->second->m_pStack != stack)
-      {
-        itr = m_stackmap.erase(itr);
-      }
-      else
-      {
-        ++itr;
-      }
+      ++itr;
+    }
+    else
+    {
+      itr = m_stackmap.erase(itr);
     }
   }
 }

@@ -997,6 +997,92 @@ int main(){
 """
 
 
+# A start callback of the player can arrive for an older item after the main
+# thread accepted a newer stack (Astra's round 35 probe). The cleanup of the
+# registrations at a start keeps the registrations of the accepted stack, and
+# the stack seek and the fullscreen condition find the part of the stack.
+def stack_registration_program(function):
+    stack = (ROOT / 'xbmc/application/ApplicationStackHelper.cpp').read_text()
+    application = (ROOT / 'xbmc/application/Application.cpp').read_text()
+    condition = application[application.index('    if (stack->GetCurrentPartNumber() == 0 ||'):]
+    condition = condition[:condition.index('\n      options.fullscreen')]
+    return r"""#include <algorithm>
+#include <cassert>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+using CCriticalSection=std::recursive_mutex;
+struct CFileItem {
+ std::string path;int offset=0;
+ const std::string& GetPath() const {return path;} int GetStartOffset() const {return offset;}
+};
+struct CFileItemList {
+ std::vector<CFileItem> items;
+ void Assign(const CFileItemList& list){items=list.items;} void Clear(){items.clear();}
+ int Size() const {return static_cast<int>(items.size());}
+ bool Contains(const std::string& path) const
+ {return std::any_of(items.begin(),items.end(),[&](const CFileItem& item){return item.path==path;});}
+};
+struct CApplicationStackHelper {
+ struct StackPartInformation {std::shared_ptr<CFileItem> m_pStack;};
+ using StackPartInformationPtr=std::shared_ptr<StackPartInformation>;
+ using Stackmap=std::map<std::string,StackPartInformationPtr>;
+ CCriticalSection m_critSection;Stackmap m_stackmap;
+ std::unique_ptr<CFileItemList> m_currentStack=std::make_unique<CFileItemList>();
+ int m_currentStackPosition=0;bool m_currentStackIsDiscImageStack=false;
+ void Adopt(CApplicationStackHelper&&);void OnPlayBackStarted(const CFileItem&);
+ bool HasRegisteredStack(const CFileItem&) const;
+ std::shared_ptr<const CFileItem> GetRegisteredStack(const CFileItem&) const;
+ StackPartInformationPtr GetStackPartInformation(const std::string&) const;
+ bool IsPlayingRegularStack() const;int GetCurrentPartNumber() const {return m_currentStackPosition;}
+ void Clear(){m_currentStackPosition=0;m_currentStack->Clear();}
+ // a stack with the parts of the paths, resumed at a part
+ void Stage(const std::vector<std::string>& paths,int position)
+ {auto item=std::make_shared<CFileItem>(CFileItem{"stack://"+paths[0]});
+  for(const auto& path:paths){m_currentStack->items.push_back({path});
+   m_stackmap[path]=std::make_shared<StackPartInformation>();m_stackmap[path]->m_pStack=item;}
+  m_currentStackPosition=position;}
+};
+// The fullscreen condition of a stack part (CApplication::PlayFile)
+static bool Fullscreen(const CApplicationStackHelper* stack,const CFileItem& item)
+{bool fullscreen=false;
+""" + condition + r"""
+      fullscreen=true;
+ return fullscreen;}
+""" + ''.join(function(stack, signature) for signature in (
+        'void CApplicationStackHelper::Adopt(', 'void CApplicationStackHelper::OnPlayBackStarted(',
+        'bool CApplicationStackHelper::HasRegisteredStack(',
+        'std::shared_ptr<const CFileItem> CApplicationStackHelper::GetRegisteredStack(',
+        'CApplicationStackHelper::StackPartInformationPtr CApplicationStackHelper::GetStackPartInformation(\n    const std::string& key) const',
+        'bool CApplicationStackHelper::IsPlayingRegularStack() const')) + r"""
+int main(){
+ CFileItem older{"older.mkv"},a2{"a2.mkv"},b1{"b1.mkv"},b2{"b2.mkv"};
+ for(int startedItem=0;startedItem<2;++startedItem){
+  // stack A plays; the user opens stack B, resumed at part 2
+  CApplicationStackHelper current,staged;current.Stage({"a1.mkv","a2.mkv"},1);
+  staged.Stage({"b1.mkv","b2.mkv"},1);
+  const auto stackB=staged.GetRegisteredStack(b2);
+  current.Adopt(std::move(staged));
+  // the start of an older item (a single video, or a part of stack A) arrives after the adoption
+  current.OnPlayBackStarted(startedItem==0?older:a2);
+  assert(current.IsPlayingRegularStack()&&current.GetRegisteredStack(b1)==stackB&&current.GetRegisteredStack(b2)==stackB);
+  assert(Fullscreen(&current,b2)==false);
+  // the started part of stack A keeps stack A for the close of the part (the resume point of the stack)
+  assert(current.HasRegisteredStack(a2)==(startedItem==1));
+  // the start of the part of stack B removes the registrations of the older stack
+  current.OnPlayBackStarted(b2);
+  assert(current.GetRegisteredStack(b2)==stackB&&current.GetRegisteredStack(b1)==stackB&&!current.HasRegisteredStack(a2));
+  // a single video replaces the stack: the start of the video removes every registration
+  current.Clear();current.OnPlayBackStarted(older);
+  assert(current.m_stackmap.empty());
+ }
+}
+"""
+
+
 def main():
     source = (ROOT / 'xbmc/application/ApplicationPlayer.cpp').read_text()
     signatures = ['std::shared_ptr<IPlayer> CApplicationPlayer::GetInternal()', 'bool CApplicationPlayer::IsPlaying() const',
@@ -1173,8 +1259,10 @@ int main(){""", 1)
     compile_run(production_play(code, playlist, function), '-play')
     compile_run(menu_program(play), '-menu')
     compile_run(stack_adopt_program(function), '-adopt')
+    compile_run(stack_registration_program(function), '-registrations')
     print('PASS production Blu-ray menu: a newer open during the menu supersedes the open, also on cancel')
     print('PASS production stack adoption: a reader on another thread keeps the list of the current stack')
+    print('PASS production stack registrations: the start of an older item keeps the registrations of the accepted stack')
 
 
 if __name__ == '__main__':
